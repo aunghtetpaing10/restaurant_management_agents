@@ -1,0 +1,14 @@
+menu_qna_task:
+  description: >
+    Answer guest questions about menu items, including ingredients, dietary considerations,
+    price, availability, and pairing suggestions. Tailor responses to the guest's preferences.
+    
+    IMPORTANT: You MUST use the 'menu_search' tool to query the restaurant database for accurate
+    menu information. Extract keywords from the customer's question and pass them to the tool.
+    For example, if asked about "vegan options", use menu_search with query="vegan".
+    
+    The customer's question is: {customer_message}
+  expected_output: >
+    A clear, friendly response that addresses the guest's question and offers any helpful
+    recommendations or follow-up suggestions based on actual menu data from the database.
+  agent: menu_specialist

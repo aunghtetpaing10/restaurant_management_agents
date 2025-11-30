@@ -1,59 +1,60 @@
 #!/usr/bin/env python
-from random import randint
+from typing import Any, Dict
 
 from pydantic import BaseModel
 
 from crewai.flow import Flow, listen, start
 
-from restaurant_flow.crews.poem_crew.poem_crew import PoemCrew
+from restaurant_flow.crews.restaurant_crew.restaurant_crew import RestaurantCrew
 
 
-class PoemState(BaseModel):
-    sentence_count: int = 1
-    poem: str = ""
+class RestaurantState(BaseModel):
+    customer_message: str = "What vegan options do you have?"
+    response: str = ""
 
 
-class PoemFlow(Flow[PoemState]):
-
+class RestaurantFlow(Flow[RestaurantState]):
     @start()
-    def generate_sentence_count(self, crewai_trigger_payload: dict = None):
-        print("Generating sentence count")
+    def receive_customer_message(self, crewai_trigger_payload: Dict[str, Any] | None = None):
+        """Capture the guest's question when the flow starts."""
+        print("Receiving customer message")
 
-        # Use trigger payload if available
-        if crewai_trigger_payload:
-            # Example: use trigger data to influence sentence count
-            self.state.sentence_count = crewai_trigger_payload.get('sentence_count', randint(1, 5))
-            print(f"Using trigger payload: {crewai_trigger_payload}")
+        if crewai_trigger_payload and crewai_trigger_payload.get("customer_message"):
+            message = str(crewai_trigger_payload["customer_message"])
+            print("Using trigger payload for customer message")
         else:
-            self.state.sentence_count = randint(1, 5)
+            message = self.state.customer_message
+            print("Using default customer message")
 
-    @listen(generate_sentence_count)
-    def generate_poem(self):
-        print("Generating poem")
-        result = (
-            PoemCrew()
-            .crew()
-            .kickoff(inputs={"sentence_count": self.state.sentence_count})
-        )
+        self.state.customer_message = message
+        print(f"Customer message: {self.state.customer_message}")
 
-        print("Poem generated", result.raw)
-        self.state.poem = result.raw
+    @listen(receive_customer_message)
+    def answer_menu_question(self):
+        """Ask the menu specialist crew to answer the guest's question."""
+        print("Routing question to menu specialist crew")
 
-    @listen(generate_poem)
-    def save_poem(self):
-        print("Saving poem")
-        with open("poem.txt", "w") as f:
-            f.write(self.state.poem)
+        crew = RestaurantCrew().crew()
+        result = crew.kickoff(inputs={"customer_message": self.state.customer_message})
+
+        self.state.response = result.raw
+        print("Menu response ready")
+
+    @listen(answer_menu_question)
+    def summarize_response(self):
+        """Output the final response for downstream use."""
+        print("Final menu response:\n")
+        print(self.state.response)
 
 
 def kickoff():
-    poem_flow = PoemFlow()
-    poem_flow.kickoff()
+    restaurant_flow = RestaurantFlow()
+    restaurant_flow.kickoff()
 
 
 def plot():
-    poem_flow = PoemFlow()
-    poem_flow.plot()
+    restaurant_flow = RestaurantFlow()
+    restaurant_flow.plot()
 
 
 def run_with_trigger():
@@ -65,7 +66,9 @@ def run_with_trigger():
 
     # Get trigger payload from command line argument
     if len(sys.argv) < 2:
-        raise Exception("No trigger payload provided. Please provide JSON payload as argument.")
+        raise Exception(
+            "No trigger payload provided. Please provide JSON payload as argument."
+        )
 
     try:
         trigger_payload = json.loads(sys.argv[1])
@@ -74,10 +77,10 @@ def run_with_trigger():
 
     # Create flow and kickoff with trigger payload
     # The @start() methods will automatically receive crewai_trigger_payload parameter
-    poem_flow = PoemFlow()
+    restaurant_flow = RestaurantFlow()
 
     try:
-        result = poem_flow.kickoff({"crewai_trigger_payload": trigger_payload})
+        result = restaurant_flow.kickoff({"crewai_trigger_payload": trigger_payload})
         return result
     except Exception as e:
         raise Exception(f"An error occurred while running the flow with trigger: {e}")

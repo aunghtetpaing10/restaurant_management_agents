@@ -3,7 +3,8 @@ revision = 2
 requires-python = ">=3.10, <3.14"
 resolution-markers = [
     "python_full_version >= '3.13'",
-    "python_full_version >= '3.11' and python_full_version < '3.13'",
+    "python_full_version == '3.12.*'",
+    "python_full_version == '3.11.*'",
     "python_full_version < '3.11'",
 ]
 
@@ -555,6 +556,13 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/22/90/7a7482c981388fcb7b559f17b8978f4fcb7a74788ceb737b10b65f6370db/crewai_tools-1.5.0.tar.gz", hash = "sha256:ca9114b656bad1de20e7a2ad543ec2f2f5232ed18fbf0a72f05daa0a7c9ced12", size = 792326, upload-time = "2025-11-16T02:07:35.258Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/29/50/55417b1ed9ff560d5d652b4d815aa1b8b9743f83c61252fe3518747e727d/crewai_tools-1.5.0-py3-none-any.whl", hash = "sha256:4a6bd29aed3ca886c83adb562a49f75d00e3f9f157f8d9134cdd9598f7d30bff", size = 755066, upload-time = "2025-11-16T02:07:33.519Z" },
+]
+
+[package.optional-dependencies]
+mcp = [
+    { name = "mcp" },
+    { name = "mcpadapt", version = "0.1.19", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "mcpadapt", version = "0.1.20", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
 
 [[package]]
@@ -1501,6 +1509,65 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/a9/bb/711099f9c6bb52770f56e56401cdfb10da5b67029f701e0df29362df4c8e/mcp-1.22.0-py3-none-any.whl", hash = "sha256:bed758e24df1ed6846989c909ba4e3df339a27b4f30f1b8b627862a4bade4e98", size = 175489, upload-time = "2025-11-20T20:11:26.542Z" },
 ]
 
+[package.optional-dependencies]
+cli = [
+    { name = "python-dotenv" },
+    { name = "typer" },
+]
+ws = [
+    { name = "websockets" },
+]
+
+[[package]]
+name = "mcp-server-sqlite"
+version = "2025.4.25"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "mcp", extra = ["cli"] },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e4/59/8b9ceea660cf973429c3fc3b8f1ea91c77790b934b098c2b78b152c598a7/mcp_server_sqlite-2025.4.25.tar.gz", hash = "sha256:5c396211adb90595d06a505ac836657fc76ee4439e132acdf65caf21b4a8de42", size = 25783, upload-time = "2025-04-25T08:27:29.192Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fc/f3/dbffd53873eafd8773e289fdd0cb96dc4f793071973df07e79a4e9bae425/mcp_server_sqlite-2025.4.25-py3-none-any.whl", hash = "sha256:5ba5706aa29d249a3cde8226577e021c07792d3198e9db40fd005578d2a0801d", size = 9618, upload-time = "2025-04-25T08:27:27.459Z" },
+]
+
+[[package]]
+name = "mcpadapt"
+version = "0.1.19"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version == '3.11.*'",
+    "python_full_version < '3.11'",
+]
+dependencies = [
+    { name = "jsonref", marker = "python_full_version < '3.12'" },
+    { name = "mcp", extra = ["ws"], marker = "python_full_version < '3.12'" },
+    { name = "pydantic", marker = "python_full_version < '3.12'" },
+    { name = "python-dotenv", marker = "python_full_version < '3.12'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d0/28/64fc666fa5d86bb1b048c167975d4ea19210f9f8571b64b26563739774ac/mcpadapt-0.1.19.tar.gz", hash = "sha256:dfab84fc75cc84a49a40bd61079773b1faf840227b74b82c71a7755b9c1957c5", size = 4227721, upload-time = "2025-10-16T07:11:56.736Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0f/21/703a79103273b5dd268457ffb94dc8b7d6efcc7fe54413e9723cf2caa8c9/mcpadapt-0.1.19-py3-none-any.whl", hash = "sha256:052e91dea8b6f530770d6fd45a1640a8c34816d18d060918dc752c5221083525", size = 19454, upload-time = "2025-10-16T07:11:55.487Z" },
+]
+
+[[package]]
+name = "mcpadapt"
+version = "0.1.20"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.13'",
+    "python_full_version == '3.12.*'",
+]
+dependencies = [
+    { name = "jsonref", marker = "python_full_version >= '3.12'" },
+    { name = "mcp", extra = ["ws"], marker = "python_full_version >= '3.12'" },
+    { name = "pydantic", marker = "python_full_version >= '3.12'" },
+    { name = "python-dotenv", marker = "python_full_version >= '3.12'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e3/71/1bbbe157e55d30ab4a74fa878f6942cc0586e9820f03e03451a3d2297e9b/mcpadapt-0.1.20.tar.gz", hash = "sha256:4047c0da61e481dd0673a48936a427da9e6547c6cf0d580ff4e4761dcf058ed1", size = 4203656, upload-time = "2025-10-24T15:35:02.135Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ba/d8/5b6c8cf2070d765904fcb9066f8d7956cb9d399807d86c7fb7f7503b80bf/mcpadapt-0.1.20-py3-none-any.whl", hash = "sha256:117a661eb536dfb0b2a73e5730c2f5ad4e611263e014fb1cebaaff9e78a18f78", size = 19481, upload-time = "2025-10-24T15:35:00.159Z" },
+]
+
 [[package]]
 name = "mdurl"
 version = "0.1.2"
@@ -1778,7 +1845,8 @@ version = "2.3.5"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13'",
-    "python_full_version >= '3.11' and python_full_version < '3.13'",
+    "python_full_version == '3.12.*'",
+    "python_full_version == '3.11.*'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/76/65/21b3bc86aac7b8f2862db1e808f1ea22b028e30a225a34a5ede9bf8678f2/numpy-2.3.5.tar.gz", hash = "sha256:784db1dcdab56bf0517743e746dfb0f885fc68d948aba86eeec2cba234bdf1c0", size = 20584950, upload-time = "2025-11-16T22:52:42.067Z" }
 wheels = [
@@ -2989,10 +3057,18 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "crewai", extra = ["tools"] },
+    { name = "crewai-tools", extra = ["mcp"] },
+    { name = "mcp" },
+    { name = "mcp-server-sqlite" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "crewai", extras = ["tools"], specifier = "==1.5.0" }]
+requires-dist = [
+    { name = "crewai", extras = ["tools"], specifier = "==1.5.0" },
+    { name = "crewai-tools", extras = ["mcp"], specifier = ">=1.5.0" },
+    { name = "mcp", specifier = ">=1.22.0" },
+    { name = "mcp-server-sqlite", specifier = ">=2025.4.25" },
+]
 
 [[package]]
 name = "rich"
