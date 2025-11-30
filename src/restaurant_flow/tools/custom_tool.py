@@ -10,11 +10,7 @@ class MenuSearchInput(BaseModel):
     """Input schema for MenuSearchTool."""
 
     query: str = Field(
-        ..., description="Guest question or keywords about menu items (e.g. 'vegan pasta')"
-    )
-    available_only: bool = Field(
-        default=False,
-        description="If true, only return menu items marked as currently available.",
+        ..., description="Guest question or keywords about menu items or categories (e.g. 'vegan pasta, appetizers')"
     )
 
 
@@ -29,7 +25,7 @@ class MenuSearchTool(BaseTool):
     )
     args_schema: Type[BaseModel] = MenuSearchInput
 
-    def _run(self, query: str, available_only: bool = False) -> str:
+    def _run(self, query: str) -> str:
         # Import here to avoid circular dependency and ensure MCP is initialized
         from restaurant_flow.mcp_init import get_mcp_tools
         
@@ -56,11 +52,8 @@ class MenuSearchTool(BaseTool):
         sql = (
             "SELECT name, category, price, description, is_available "
             "FROM menu_items "
-            f"WHERE (name LIKE '%{cleaned_query}%' OR description LIKE '%{cleaned_query}%')"
+            f"WHERE (name LIKE '%{cleaned_query}%' OR description LIKE '%{cleaned_query}%' OR category LIKE '%{cleaned_query}%')"
         )
-
-        if available_only:
-            sql += " AND is_available = 1"
 
         sql += " ORDER BY category, name LIMIT 10"
 
