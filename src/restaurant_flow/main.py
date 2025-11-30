@@ -3,7 +3,19 @@ from crewai import Agent
 from crewai.flow.flow import Flow, listen, or_, start, router
 from pydantic import BaseModel, Field
 
-from restaurant_flow.tools.custom_tool import MenuSearchTool, OrderLookupTool
+from restaurant_flow.tools.custom_tool import (
+    MenuSearchTool,
+    OrderLookupTool,
+    ReservationLookupTool,
+)
+
+
+class IntentClassification(BaseModel):
+    """Intent classifier structured output."""
+
+    intent: str = Field(
+        description="Detected intent category (menu_inquiry, order_request, reservation_request, general_question, other)"
+    )
 
 
 class MenuResponse(BaseModel):
@@ -28,6 +40,23 @@ class OrderResponse(BaseModel):
     order_status: str = Field(description="Status of the order")
 
 
+class ReservationResponse(BaseModel):
+    """Structured output for reservation inquiries."""
+
+    reservation_id: int | None = Field(
+        default=None, description="Reservation ID if available"
+    )
+    party_size: int = Field(description="Number of guests")
+    reservation_datetime: str = Field(description="Reservation date (YYYY-MM-DD)")
+    status: str = Field(
+        description="Status of reservation (confirmed, waitlisted, cancelled, etc.)"
+    )
+    special_requests: str = Field(
+        default="",
+        description="Any special requests from the customer",
+    )
+
+
 class FinalResponse(BaseModel):
     """Structured output for the final composed response."""
 
@@ -40,9 +69,11 @@ class FinalResponse(BaseModel):
 
 
 class RestaurantState(BaseModel):
-    customer_message: str = "What is the order status of ID #3"
+    customer_message: str = "Give me details of reservation ID 1"
+    classification: IntentClassification | None = None
     menu_response: MenuResponse | None = None
     order_response: OrderResponse | None = None
+    reservation_response: ReservationResponse | None = None
     final_response: FinalResponse | None = None
 
 
@@ -54,28 +85,68 @@ class RestaurantFlow(Flow[RestaurantState]):
 
     @router(receive_message)
     def classify_intent(self):
-        print("[CLASSIFY] Classifying intent...")
-        message = self.state.customer_message.lower()
+        print("[CLASSIFY] Classifying intent with agent...")
 
-        # Check for order-related keywords
+        classifier = Agent(
+            role="Intent Classifier",
+            goal="Accurately determine the customer's underlying intent",
+            backstory=(
+                "You are a restaurant service triage specialist. You quickly understand what the customer really wants from their message and route them to the best specialist."
+            ),
+            verbose=True,
+        )
+
+        query = f"""
+        Customer message: "{self.state.customer_message}"
+
+        Possible intents:
+        - menu_inquiry: The guest wants menu details, recommendations, dietary info.
+        - order_request: The guest wants to place an order, check status, modify, or cancel.
+        - reservation_request: The guest wants to book, modify, confirm, or cancel a reservation.
+        - general_question: The guest has a general or service question not covered above.
+        - other: Anything that does not fit the above categories.
+
+        Task:
+        Identify the most appropriate intent.
+        """
+
+        result = classifier.kickoff(query, response_format=IntentClassification)
+        classification = result.pydantic
+
+        print("\n" + "=" * 60)
+        print("[DEBUG] Intent Classification Result:")
+        print(f"  - Intent: {classification.intent}")
+        print("=" * 60)
+
+        self.state.classification = classification
+
+        intent = classification.intent.lower().strip()
+        if intent in {"menu", "menu_inquiry"}:
+            print("[CLASSIFY] Routing to menu specialist")
+            return "menu_inquiry"
+        if intent in {"order", "order_request"}:
+            print("[CLASSIFY] Routing to order handler")
+            return "order_request"
+        if intent in {"reservation", "reservation_request"}:
+            print(
+                "[CLASSIFY] Detected reservation intent (not yet implemented), defaulting to menu"
+            )
+            return "reservation_request"
+
+        # Fallback heuristic if agent returns unexpected intent
+        message = self.state.customer_message.lower()
         if any(
             keyword in message for keyword in ["order", "status", "check order", "#"]
         ):
-            print("[CLASSIFY] Intent: ORDER")
-            return "order"
-        # Check for menu-related keywords
-        elif any(
-            keyword in message
-            for keyword in ["menu", "appetizers", "dish", "food", "what do you have"]
-        ):
-            print("[CLASSIFY] Intent: MENU")
-            return "menu"
-        else:
-            # Default to menu
-            print("[CLASSIFY] Intent: MENU (default)")
-            return "menu"
+            print("[CLASSIFY] Fallback routing to order handler")
+            return "order_request"
+        if any(keyword in message for keyword in ["reserve", "reservation", "book"]):
+            print("[CLASSIFY] Fallback routing to reservation agent")
+            return "reservation_request"
+        print("[CLASSIFY] Fallback routing to menu specialist")
+        return "menu_inquiry"
 
-    @listen("menu")
+    @listen("menu_inquiry")
     def handle_menu(self):
         print("[MENU] Processing menu inquiry...")
 
@@ -114,7 +185,7 @@ class RestaurantFlow(Flow[RestaurantState]):
         self.state.menu_response = result.pydantic
         return self.state.menu_response
 
-    @listen("order")
+    @listen("order_request")
     def handle_order(self):
         print("[ORDER] Processing order request...")
 
@@ -196,7 +267,45 @@ class RestaurantFlow(Flow[RestaurantState]):
         self.state.order_response = result.pydantic
         return self.state.order_response
 
-    @listen(or_(handle_menu, handle_order))
+    @listen("reservation_request")
+    def handle_reservation(self):
+        print("[RESERVATION] Processing reservation request...")
+
+        reservation_agent = Agent(
+            role="Reservation Agent",
+            goal="Manage table reservations accurately",
+            backstory=(
+                "You coordinate reservations, ensure availability, and communicate clearly with guests."
+            ),
+            tools=[ReservationLookupTool()],
+            verbose=True,
+        )
+
+        query = f"""
+        Customer request: '{self.state.customer_message}'
+
+        Your task:
+        1. Extract party size, date, time, and any special requests.
+        2. Use the reservation_lookup tool to check availability or fetch reservation details.
+        3. Provide structured output including reservation ID (if existing), party size, date, time, status, and requests.
+        4. Be concise and professional.
+        """
+
+        result = reservation_agent.kickoff(query, response_format=ReservationResponse)
+
+        print("\n" + "=" * 60)
+        print("[DEBUG] Reservation Agent Result:")
+        print(f"  - Reservation ID: {result.pydantic.reservation_id}")
+        print(f"  - Party size: {result.pydantic.party_size}")
+        print(f"  - Date: {result.pydantic.reservation_datetime}")
+        print(f"  - Status: {result.pydantic.status}")
+        print(f"  - Special requests: {result.pydantic.special_requests}")
+        print("=" * 60)
+
+        self.state.reservation_response = result.pydantic
+        return self.state.reservation_response
+
+    @listen(or_(handle_menu, handle_order, handle_reservation))
     def deliver_response(self):
         composer = Agent(
             role="Response Composer",
@@ -226,6 +335,16 @@ class RestaurantFlow(Flow[RestaurantState]):
             - Items ordered: {", ".join(order.items_ordered)}
             - Total amount: ${order.total_amount}
             - Order status: {order.order_status}
+            """
+        elif self.state.reservation_response:
+            reservation = self.state.reservation_response
+            specialist_data = f"""
+            Reservation Agent Response:
+            - Reservation ID: {reservation.reservation_id}
+            - Party size: {reservation.party_size}
+            - Date: {reservation.reservation_datetime}
+            - Status: {reservation.status}
+            - Special requests: {reservation.special_requests}
             """
 
         print("\n" + "=" * 60)
