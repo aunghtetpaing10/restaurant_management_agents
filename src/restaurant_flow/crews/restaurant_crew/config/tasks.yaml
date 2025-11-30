@@ -1,4 +1,25 @@
-menu_qna_task:
+classify_intent_task:
+  description: >
+    Analyze the customer's message and determine their primary intent.
+    
+    Customer message: {customer_message}
+    
+    Classify the intent into ONE of these categories:
+    - MENU_INQUIRY: Questions about food, drinks, ingredients, dietary options
+    - ORDER_REQUEST: Wants to place an order, add items, OR check order status
+    - RESERVATION_REQUEST: Wants to book a table, modify a reservation, OR check reservation status
+    - GENERAL_INQUIRY: General questions about hours, location, policies
+    - MULTIPLE_INTENTS: Message contains multiple different requests
+    
+    Note: ORDER_REQUEST and RESERVATION_REQUEST include both creating AND checking status.
+    
+    Provide a brief explanation of why you classified it this way.
+  expected_output: >
+    A classification result with the intent category and a brief explanation.
+    Format: "Intent: [CATEGORY]. Explanation: [reason]"
+  agent: intent_classifier
+
+menu_inquiry_task:
   description: >
     Answer guest questions about menu items, including ingredients, dietary considerations,
     price, availability, and pairing suggestions. Tailor responses to the guest's preferences.
@@ -7,8 +28,88 @@ menu_qna_task:
     menu information. Extract keywords from the customer's question and pass them to the tool.
     For example, if asked about "vegan options", use menu_search with query="vegan".
     
-    The customer's question is: {customer_message}
+    Customer message: {customer_message}
+    
+    Review the intent classification from the previous task. If no menu inquiry was detected,
+    simply return "N/A - No menu inquiry in this request."
   expected_output: >
-    A clear, friendly response that addresses the guest's question and offers any helpful
-    recommendations or follow-up suggestions based on actual menu data from the database.
+    Detailed menu information with dish names, prices, descriptions, and availability.
+    If no menu inquiry was detected, return "N/A - No menu inquiry in this request."
   agent: menu_specialist
+  context:
+    - classify_intent_task
+
+process_order_task:
+  description: >
+    Handle customer order requests - create new orders OR check order status.
+    
+    IMPORTANT: Use the 'order_lookup' tool with the appropriate action:
+    - action='create': Create new order (requires customer_id and items JSON)
+    - action='lookup_by_id': Check order status by order ID
+    - action='lookup_by_phone': Check all orders for a phone number
+    
+    For new orders, first verify items exist using menu_search if needed.
+    
+    Customer message: {customer_message}
+    
+    Review the intent classification and menu information from previous tasks.
+    If no order-related request was detected, simply return "N/A - No order request in this message."
+  expected_output: >
+    For new orders: Order confirmation with order ID, items, quantities, total price.
+    For status checks: Order details including status, items, and customer info.
+    If no order request was detected, return "N/A - No order request in this message."
+  agent: order_handler
+  context:
+    - classify_intent_task
+    - menu_inquiry_task
+
+handle_reservation_task:
+  description: >
+    Handle customer reservation requests - create new reservations OR check reservation status.
+    
+    IMPORTANT: Use the 'reservation_lookup' tool with the appropriate action:
+    - action='create': Create new reservation (requires customer_id, party_size, reservation_date, reservation_time)
+    - action='lookup_by_id': Check reservation status by reservation ID
+    - action='lookup_by_phone': Check all reservations for a phone number
+    
+    Extract relevant information from the customer message.
+    
+    Customer message: {customer_message}
+    
+    Review the intent classification from previous tasks.
+    If no reservation-related request was detected, simply return "N/A - No reservation request in this message."
+  expected_output: >
+    For new reservations: Confirmation with reservation ID, date, time, party size, and status.
+    For status checks: Reservation details including status, date, time, and customer info.
+    If no reservation request was detected, return "N/A - No reservation request in this message."
+  agent: reservation_agent
+  context:
+    - classify_intent_task
+
+compose_response_task:
+  description: >
+    Compose the final customer response by synthesizing information from all specialists.
+    
+    Customer message: {customer_message}
+    
+    Review the outputs from all previous tasks:
+    - Intent classification
+    - Menu information (if applicable)
+    - Order details (if applicable)
+    - Reservation details (if applicable)
+    
+    Create a warm, professional response that:
+    1. Acknowledges the customer's request
+    2. Provides relevant information from specialists
+    3. Offers helpful next steps or suggestions
+    4. Maintains a friendly, service-oriented tone
+    5. Only includes information that was actually provided (skip N/A sections)
+  expected_output: >
+    A complete, polished customer response that addresses all aspects of their request
+    in a friendly and professional manner.
+  agent: response_composer
+  context:
+    - classify_intent_task
+    - menu_inquiry_task
+    - process_order_task
+    - handle_reservation_task
