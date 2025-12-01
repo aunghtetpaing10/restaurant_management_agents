@@ -1,5 +1,5 @@
 from typing import List
-from crewai import Agent
+from crewai import LLM, Agent
 from crewai.flow.flow import Flow, listen, or_, start, router
 from pydantic import BaseModel, Field
 
@@ -7,6 +7,11 @@ from restaurant_flow.tools.custom_tool import (
     MenuSearchTool,
     OrderLookupTool,
     ReservationLookupTool,
+)
+
+llm = LLM(
+    model="ollama/llama3.1:8b",
+    base_url="http://localhost:11434"
 )
 
 
@@ -32,7 +37,10 @@ class MenuResponse(BaseModel):
 class OrderResponse(BaseModel):
     """Structured output for order inquiries."""
 
-    order_id: int = Field(description="ID of the order")
+    order_id: int | None = Field(
+        default=None,
+        description="ID of the order (if known or after creation)",
+    )
     items_ordered: List[str] = Field(
         description="List of ordered items (e.g., ['Caesar Salad', 'Margherita Pizza'])"
     )
@@ -69,7 +77,7 @@ class FinalResponse(BaseModel):
 
 
 class RestaurantState(BaseModel):
-    customer_message: str = "Give me details of reservation ID 1"
+    customer_message: str = "I'd like to reserve a table for 4 people for tomorrow at 7pm. My ID is 1."
     classification: IntentClassification | None = None
     menu_response: MenuResponse | None = None
     order_response: OrderResponse | None = None
@@ -94,6 +102,7 @@ class RestaurantFlow(Flow[RestaurantState]):
                 "You are a restaurant service triage specialist. You quickly understand what the customer really wants from their message and route them to the best specialist."
             ),
             verbose=True,
+            llm=llm,
         )
 
         query = f"""
@@ -159,6 +168,7 @@ class RestaurantFlow(Flow[RestaurantState]):
             ),
             tools=[MenuSearchTool()],
             verbose=True,
+            llm=llm,
         )
 
         query = f"""
@@ -211,13 +221,14 @@ class RestaurantFlow(Flow[RestaurantState]):
             ),
             tools=[OrderLookupTool()],
             verbose=True,
+            llm=llm,
         )
 
         # Build query with explicit order ID if found
         if extracted_id:
             query = f"""
         Customer is asking about ORDER ID: {extracted_id}
-        
+
         CRITICAL INSTRUCTION: You MUST use order_id={extracted_id} when calling the order_lookup tool.
         DO NOT use any other number. The customer specifically asked about order #{extracted_id}.
         
@@ -238,19 +249,34 @@ class RestaurantFlow(Flow[RestaurantState]):
         else:
             query = f"""
         Customer request: '{self.state.customer_message}'
-        
+
+        ORDER INTAKE MODE (no explicit order ID detected)
+
         Your task:
-        1. FIRST, carefully extract the order ID from the customer's message:
-           - Look for patterns like "ID #18", "order #18", "#18", "order 18", "ID: 18"
-           - Extract ONLY the numeric part
-        
-        2. Use the order_lookup tool with the EXACT order ID you extracted:
-           - action: 'lookup_by_id'
-           - order_id: [the number you extracted]
-        
-        3. Provide comprehensive information from the database response.
-        
-        4. Structure your response according to the specified OrderResponse format.
+        1. Determine if the guest is trying to PLACE a NEW ORDER.
+           - Look for menu item names or ordering language ("I'd like", "Can I order", etc.).
+           - Reference the menu cheat sheet below when mapping items to menu_item_id values.
+        2. Extract the requested items with quantities. If quantity not given, assume 1 and note that clarification is needed.
+        3. Check for any customer identifiers (name, phone, email, loyalty ID). If none provided, note that they are needed before order creation.
+        4. Only call the order_lookup tool with action 'create' if ALL required data is present:
+             - action: 'create'
+             - customer_id: <ID from message or known mapping>
+             - items: JSON string like [{{"menu_item_id": 5, "quantity": 2}}, ...]
+           If required data is missing, DO NOT call the tool. Instead, set order_status to "awaiting_customer_details" and list what is missing.
+        5. Populate the OrderResponse as follows:
+             - order_id: Use ID returned by the tool if created; otherwise leave as null.
+             - items_ordered: List the items the guest wants (even if the order isn’t created yet).
+             - total_amount: Use value from the tool if available; otherwise 0.0 until confirmed.
+             - order_status: One of "created", "awaiting_customer_details", "unrecognized_request", or another clear status.
+        6. If the message is NOT an order request, set order_status to "unrecognized_request" and explain why in the reasoning.
+        7. Be explicit in your reasoning so downstream agents know the current state of the order.
+
+        MENU CHEAT SHEET (ID -> Item Name):
+        - 2 -> "Crispy Calamari"
+        - 42 -> "Cold Brew Coffee"
+
+        TOOL USAGE EXAMPLE (only when all required data is present):
+        order_lookup(action='create', customer_id=1, items='[{{"menu_item_id": 2, "quantity": 1}}, {{"menu_item_id": 42, "quantity": 1}}]')
         """
 
         result = order_handler.kickoff(query, response_format=OrderResponse)
@@ -279,16 +305,27 @@ class RestaurantFlow(Flow[RestaurantState]):
             ),
             tools=[ReservationLookupTool()],
             verbose=True,
+            llm=llm,
         )
 
         query = f"""
         Customer request: '{self.state.customer_message}'
 
-        Your task:
-        1. Extract party size, date, time, and any special requests.
-        2. Use the reservation_lookup tool to check availability or fetch reservation details.
-        3. Provide structured output including reservation ID (if existing), party size, date, time, status, and requests.
-        4. Be concise and professional.
+        You are the restaurant's reservation specialist. Determine how best to help this guest:
+        1. Identify whether they are referencing an existing reservation (modifying, confirming, cancelling) or requesting a brand-new booking.
+        2. Choose the appropriate reservation_lookup action:
+           - reservation_lookup(action='lookup_by_id', reservation_id=123) when a reservation number is provided.
+           - reservation_lookup(action='lookup_by_phone', phone='5551234567') when only a phone/contact is provided.
+           - reservation_lookup(action='create', customer_id=4, party_size=2, reservation_date='2025-12-24', reservation_time='19:30') when you have enough details to book a new table AND a valid customer identifier (ID or a mapped phone number).
+        3. If critical details (party size, date, time, customer identifier) are missing, DO NOT call the tool. Instead, set status to "awaiting_details" and clearly list what is needed in special_requests.
+        3a. If customer_id is missing but the guest provided a phone number, first run reservation_lookup(action='lookup_by_phone', ...) to retrieve the customer record and use its ID when creating the reservation.
+        4. Populate ReservationResponse carefully:
+           - reservation_id: from the tool response when available (leave null otherwise).
+           - party_size: numeric value inferred from the message or tool.
+           - reservation_datetime: use "YYYY-MM-DD HH:MM" when you know both; otherwise provide the best-available description (e.g., "tomorrow 7pm").
+           - status: choose a clear lifecycle label such as confirmed, awaiting_details, not_found, cancelled, etc.
+           - special_requests: include guest preferences, accessibility notes, or outstanding questions for follow-up.
+        5. Keep your reasoning concise and professional so the concierge team can act immediately on your output.
         """
 
         result = reservation_agent.kickoff(query, response_format=ReservationResponse)
@@ -297,7 +334,7 @@ class RestaurantFlow(Flow[RestaurantState]):
         print("[DEBUG] Reservation Agent Result:")
         print(f"  - Reservation ID: {result.pydantic.reservation_id}")
         print(f"  - Party size: {result.pydantic.party_size}")
-        print(f"  - Date: {result.pydantic.reservation_datetime}")
+        print(f"  - Date/time: {result.pydantic.reservation_datetime}")
         print(f"  - Status: {result.pydantic.status}")
         print(f"  - Special requests: {result.pydantic.special_requests}")
         print("=" * 60)
@@ -316,6 +353,7 @@ class RestaurantFlow(Flow[RestaurantState]):
                 "that address the customer's needs while maintaining a professional tone."
             ),
             verbose=True,
+            llm=llm,
         )
 
         # Format the specialist response data for the composer

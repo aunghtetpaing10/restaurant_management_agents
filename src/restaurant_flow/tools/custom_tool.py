@@ -1,4 +1,6 @@
 import ast
+import re
+from datetime import datetime
 from typing import Type
 
 from pydantic import BaseModel, Field
@@ -388,27 +390,31 @@ class ReservationLookupInput(BaseModel):
         ...,
         description="Action to perform: 'create' to create new reservation, 'lookup_by_id' to check status by reservation ID, 'lookup_by_phone' to check reservations by phone number",
     )
-    customer_id: int = Field(
+    customer_id: int | None = Field(
         default=None,
         description="ID of the customer (required for 'create' action)",
     )
-    party_size: int = Field(
+    party_size: int | None = Field(
         default=None,
         description="Number of people in the party (required for 'create' action)",
     )
-    reservation_date: str = Field(
+    reservation_date: str | None = Field(
         default=None,
         description="Date of reservation in YYYY-MM-DD format (required for 'create' action)",
     )
-    reservation_time: str = Field(
+    reservation_time: str | None = Field(
         default=None,
         description="Time of reservation in HH:MM format (required for 'create' action)",
     )
-    reservation_id: int = Field(
+    reservation_datetime: str | None = Field(
+        default=None,
+        description="Combined reservation date and time (YYYY-MM-DD HH:MM) for 'create' action",
+    )
+    reservation_id: int | None = Field(
         default=None,
         description="Reservation ID to lookup (required for 'lookup_by_id' action)",
     )
-    phone: str = Field(
+    phone: str | None = Field(
         default=None,
         description="Customer phone number to lookup reservations (required for 'lookup_by_phone' action)",
     )
@@ -435,6 +441,7 @@ class ReservationLookupTool(BaseTool):
         party_size: int = None,
         reservation_date: str = None,
         reservation_time: str = None,
+        reservation_datetime: str = None,
         reservation_id: int = None,
         phone: str = None,
     ) -> str:
@@ -465,7 +472,13 @@ class ReservationLookupTool(BaseTool):
         # Route to appropriate action
         if action == "create":
             return self._create_reservation(
-                customer_id, party_size, reservation_date, reservation_time, write_query_tool, read_query_tool
+                customer_id=customer_id,
+                party_size=party_size,
+                reservation_date=reservation_date,
+                reservation_time=reservation_time,
+                reservation_datetime=reservation_datetime,
+                write_query_tool=write_query_tool,
+                read_query_tool=read_query_tool,
             )
         elif action == "lookup_by_id":
             return self._lookup_by_id(reservation_id, read_query_tool)
@@ -475,20 +488,50 @@ class ReservationLookupTool(BaseTool):
             return f"ReservationLookupTool error: Unknown action '{action}'. Use 'create', 'lookup_by_id', or 'lookup_by_phone'."
 
     def _create_reservation(
-        self, customer_id: int, party_size: int, reservation_date: str, reservation_time: str, write_query_tool, read_query_tool
+        self,
+        customer_id: int,
+        party_size: int,
+        reservation_date: str | None = None,
+        reservation_time: str | None = None,
+        reservation_datetime: str | None = None,
+        write_query_tool=None,
+        read_query_tool=None,
     ) -> str:
         """Create a new reservation."""
-        if not customer_id or not party_size or not reservation_date or not reservation_time:
-            return "ReservationLookupTool error: customer_id, party_size, reservation_date, and reservation_time are required for 'create' action."
+        if not customer_id or not party_size:
+            return "ReservationLookupTool error: customer_id and party_size are required for 'create' action."
 
         if not write_query_tool:
             return "ReservationLookupTool error: write_query tool not available for creating reservations."
 
-        # Create reservation - combine date and time into datetime
-        reservation_datetime = f"{reservation_date} {reservation_time}:00"
+        normalized_date = None
+        normalized_time = None
+
+        if reservation_datetime:
+            normalized_date, normalized_time = self._normalize_datetime(reservation_datetime)
+            if not normalized_date or not normalized_time:
+                return (
+                    "ReservationLookupTool error: reservation_datetime must include a valid date and time. "
+                    f"Received '{reservation_datetime}'."
+                )
+        else:
+            normalized_date = self._normalize_date(reservation_date)
+            if not normalized_date:
+                return (
+                    "ReservationLookupTool error: reservation_date must be provided in YYYY-MM-DD (or similar) format. "
+                    f"Received '{reservation_date}'."
+                )
+
+            normalized_time = self._normalize_time(reservation_time)
+            if not normalized_time:
+                return (
+                    "ReservationLookupTool error: reservation_time must be provided in HH:MM or H:MM AM/PM format. "
+                    f"Received '{reservation_time}'."
+                )
+
         create_reservation_sql = (
             f"INSERT INTO reservations (customer_id, party_size, reservation_datetime, status) "
-            f"VALUES ({customer_id}, {party_size}, '{reservation_datetime}', 'confirmed')"
+            f"VALUES ({customer_id}, {party_size}, '{normalized_date} {normalized_time}:00', 'confirmed')"
         )
 
         try:
@@ -503,20 +546,96 @@ class ReservationLookupTool(BaseTool):
         )
         try:
             reservation_id_response = read_query_tool.run(query=get_reservation_id_sql)
-            reservation_id_results = ast.literal_eval(reservation_id_response)
-            reservation_id = reservation_id_results[0].get("id")
+            reservation_id_results = self._parse_query_results(reservation_id_response)
         except Exception as e:
             return f"ReservationLookupTool error: Failed to get reservation ID - {str(e)}"
+
+        if not reservation_id_results:
+            return (
+                "ReservationLookupTool warning: Reservation was created but the new ID could not be retrieved. "
+                "Please verify the reservation manually."
+            )
+
+        reservation_id = reservation_id_results[0].get("id")
+        if reservation_id is None:
+            return (
+                "ReservationLookupTool warning: Reservation was created but the new ID was not returned by the database. "
+                "Please verify the reservation manually."
+            )
 
         return (
             f"Reservation created successfully!\n"
             f"Reservation ID: {reservation_id}\n"
             f"Customer ID: {customer_id}\n"
             f"Party Size: {party_size}\n"
-            f"Date: {reservation_date}\n"
-            f"Time: {reservation_time}\n"
+            f"Date: {normalized_date}\n"
+            f"Time: {normalized_time}\n"
             f"Status: Confirmed"
         )
+
+    def _normalize_date(self, raw_date: str | None) -> str | None:
+        if not raw_date:
+            return None
+
+        candidate = raw_date.strip()
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%d/%m/%Y"):
+            try:
+                return datetime.strptime(candidate, fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+        return None
+
+    def _normalize_time(self, raw_time: str | None) -> str | None:
+        if not raw_time:
+            return None
+
+        candidate = raw_time.strip().lower()
+
+        for fmt in ("%H:%M", "%H:%M:%S"):
+            try:
+                return datetime.strptime(candidate, fmt).strftime("%H:%M")
+            except ValueError:
+                continue
+
+        match = re.match(r"^(1[0-2]|0?[1-9])(?::(\d{2}))?\s*(am|pm)$", candidate)
+        if match:
+            hour = int(match.group(1)) % 12
+            minutes = match.group(2) or "00"
+            period = match.group(3)
+            if period == "pm":
+                hour += 12
+            return f"{hour:02d}:{minutes}"
+
+        return None
+
+    def _normalize_datetime(self, raw_datetime: str | None) -> tuple[str | None, str | None]:
+        if not raw_datetime:
+            return (None, None)
+
+        candidate = raw_datetime.strip().replace("T", " ")
+
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+            try:
+                parsed = datetime.strptime(candidate, fmt)
+                return parsed.strftime("%Y-%m-%d"), parsed.strftime("%H:%M")
+            except ValueError:
+                continue
+
+        return (None, None)
+
+    def _parse_query_results(self, response: str | list | dict) -> list[dict]:
+        if isinstance(response, list):
+            return response
+        if isinstance(response, dict):
+            if not response.get("success", True):
+                raise RuntimeError(response.get("error", "Unknown MCP error"))
+            return response.get("results", response.get("data", []))
+        if isinstance(response, str):
+            try:
+                return ast.literal_eval(response)
+            except (ValueError, SyntaxError) as exc:
+                raise ValueError(f"ReservationLookupTool error: Failed to parse response - {exc}") from exc
+        raise TypeError(f"ReservationLookupTool received unexpected response format: {type(response).__name__}")
 
     def _lookup_by_id(self, reservation_id: int, read_query_tool) -> str:
         """Look up reservation status by reservation ID."""
