@@ -19,7 +19,15 @@ class IntentClassification(BaseModel):
     """Intent classifier structured output."""
 
     intent: str = Field(
-        description="Detected intent category (menu_inquiry, order_request, reservation_request, general_question, other)"
+        description="Detected intent category (menu_inquiry, order_request, reservation_request, general_question, complaint, unclear, other)"
+    )
+    requires_escalation: bool = Field(
+        default=False,
+        description="True if the message contains a complaint, urgent issue, or requires human intervention"
+    )
+    confidence: str = Field(
+        default="high",
+        description="Confidence level in the classification: high, medium, or low"
     )
 
 
@@ -77,7 +85,7 @@ class FinalResponse(BaseModel):
 
 
 class RestaurantState(BaseModel):
-    customer_message: str = "I'd like to reserve a table for 4 people for tomorrow at 7pm. My ID is 1."
+    customer_message: str = "How do I order a meal?"
     classification: IntentClassification | None = None
     menu_response: MenuResponse | None = None
     order_response: OrderResponse | None = None
@@ -108,15 +116,63 @@ class RestaurantFlow(Flow[RestaurantState]):
         query = f"""
         Customer message: "{self.state.customer_message}"
 
+        Your task is to analyze the customer's message and determine:
+        1. The primary intent category
+        2. Whether the message requires escalation (complaints, urgent issues, dissatisfaction)
+        3. Your confidence level in the classification
+
+        IMPORTANT: Read the message carefully and distinguish between ASKING ABOUT something vs. DOING something.
+
         Possible intents:
-        - menu_inquiry: The guest wants menu details, recommendations, dietary info.
-        - order_request: The guest wants to place an order, check status, modify, or cancel.
-        - reservation_request: The guest wants to book, modify, confirm, or cancel a reservation.
-        - general_question: The guest has a general or service question not covered above.
+        - menu_inquiry: The guest wants menu details, recommendations, dietary info, prices. Examples: "What's on the menu?", "Do you have vegan options?", "How much is the steak?"
+        
+        - order_request: The guest is ACTIVELY placing an order RIGHT NOW with specific items, OR checking/modifying an existing order with an order ID/number. 
+          Examples: "I want to order 2 chicken wings", "I'll have the Caesar salad", "Where is my order #123?", "Cancel my order"
+          NOT THIS: "How do I order?", "What's the ordering process?", "Can I order online?"
+        
+        - reservation_request: The guest is ACTIVELY making a reservation RIGHT NOW with specific details (date/time/party size), OR checking/modifying an existing reservation.
+          Examples: "Book a table for 4 at 7pm tomorrow", "I'd like to reserve for tonight", "Cancel my reservation for Smith"
+          NOT THIS: "How do I make a reservation?", "Do you take reservations?", "What's your booking policy?"
+        
+        - general_question: The guest is asking HOW to do something, asking about policies/procedures/hours/location, or seeking information WITHOUT taking action.
+          Examples: "How do I order a meal?", "How can I make a reservation?", "What are your hours?", "Do you deliver?", "Where are you located?", "How does payment work?"
+          This is for INFORMATIONAL questions, not action requests.
+        
+        - complaint: The guest is expressing dissatisfaction, reporting a problem, or making a complaint.
+        
+        - unclear: The message is ambiguous, incomplete, or you cannot confidently determine the intent.
+        
         - other: Anything that does not fit the above categories.
 
-        Task:
-        Identify the most appropriate intent.
+        Escalation criteria (set requires_escalation=true if ANY of these apply):
+        - Customer is complaining about service, food quality, wait times, or any aspect of their experience
+        - Customer is expressing anger, frustration, or strong dissatisfaction
+        - Customer is requesting to speak with a manager or supervisor
+        - Customer is threatening negative reviews, legal action, or similar escalations
+        - Customer is reporting a serious issue (food safety, allergies not honored, billing errors)
+        - Message tone is hostile, aggressive, or demanding immediate attention
+
+        Confidence guidelines:
+        - high: The intent is clear and unambiguous
+        - medium: The intent is likely but could have alternative interpretations
+        - low: The message is vague, unclear, or could fit multiple categories
+
+        DECISION TREE:
+        1. Does the message contain "how", "how do I", "how can I", "what's the process", "can I", or similar question words about procedures?
+           → Likely general_question
+        
+        2. Does the message specify items to order (e.g., "chicken wings", "salad", "pizza") OR an order number?
+           → Likely order_request
+        
+        3. Does the message specify reservation details (date, time, party size) OR a reservation name/ID?
+           → Likely reservation_request
+        
+        4. Does the message ask about menu items, prices, ingredients, or food options?
+           → Likely menu_inquiry
+
+        CRITICAL: "How do I order a meal?" is asking ABOUT the ordering process = general_question, NOT order_request.
+
+        Provide your classification with the intent, escalation flag, and confidence level.
         """
 
         result = classifier.kickoff(query, response_format=IntentClassification)
@@ -125,9 +181,16 @@ class RestaurantFlow(Flow[RestaurantState]):
         print("\n" + "=" * 60)
         print("[DEBUG] Intent Classification Result:")
         print(f"  - Intent: {classification.intent}")
+        print(f"  - Requires Escalation: {classification.requires_escalation}")
+        print(f"  - Confidence: {classification.confidence}")
         print("=" * 60)
 
         self.state.classification = classification
+
+        # Check for escalation first
+        if classification.requires_escalation:
+            print("[CLASSIFY] ESCALATION REQUIRED - Routing to escalation handler")
+            return "escalation"
 
         intent = classification.intent.lower().strip()
         if intent in {"menu", "menu_inquiry"}:
@@ -137,23 +200,21 @@ class RestaurantFlow(Flow[RestaurantState]):
             print("[CLASSIFY] Routing to order handler")
             return "order_request"
         if intent in {"reservation", "reservation_request"}:
-            print(
-                "[CLASSIFY] Detected reservation intent (not yet implemented), defaulting to menu"
-            )
+            print("[CLASSIFY] Routing to reservation agent")
             return "reservation_request"
+        if intent in {"complaint"}:
+            print("[CLASSIFY] Complaint detected - Routing to escalation handler")
+            return "escalation"
+        if intent in {"unclear"}:
+            print("[CLASSIFY] Unclear intent - Routing to fallback handler")
+            return "fallback"
+        if intent in {"general_question", "other"}:
+            print("[CLASSIFY] General/other intent - Routing to fallback handler")
+            return "fallback"
 
-        # Fallback heuristic if agent returns unexpected intent
-        message = self.state.customer_message.lower()
-        if any(
-            keyword in message for keyword in ["order", "status", "check order", "#"]
-        ):
-            print("[CLASSIFY] Fallback routing to order handler")
-            return "order_request"
-        if any(keyword in message for keyword in ["reserve", "reservation", "book"]):
-            print("[CLASSIFY] Fallback routing to reservation agent")
-            return "reservation_request"
-        print("[CLASSIFY] Fallback routing to menu specialist")
-        return "menu_inquiry"
+        # Final safety fallback
+        print("[CLASSIFY] Unrecognized intent - Routing to fallback handler")
+        return "fallback"
 
     @listen("menu_inquiry")
     def handle_menu(self):
@@ -341,6 +402,89 @@ class RestaurantFlow(Flow[RestaurantState]):
 
         self.state.reservation_response = result.pydantic
         return self.state.reservation_response
+
+    @listen("escalation")
+    def handle_escalation(self):
+        print("[ESCALATION] Processing escalation request...")
+
+        escalation_agent = Agent(
+            role="Customer Service Manager",
+            goal="Handle escalations and complaints with empathy and urgency",
+            backstory=(
+                "You are a senior customer service manager who specializes in de-escalating situations, "
+                "addressing complaints professionally, and ensuring customers feel heard and valued. "
+                "You have the authority to offer solutions and take immediate action."
+            ),
+            verbose=True,
+            llm=llm,
+        )
+
+        query = f"""
+        Customer message: '{self.state.customer_message}'
+        Classification: {self.state.classification.intent}
+        Escalation reason: This message was flagged as requiring immediate attention.
+
+        Your task:
+        1. Acknowledge the customer's concern with empathy and professionalism.
+        2. Apologize sincerely if appropriate.
+        3. Explain what immediate steps you will take to address their issue.
+        4. Offer a specific solution, compensation, or next steps.
+        5. Provide direct contact information for follow-up (manager line, email).
+        6. Ensure the tone is warm, understanding, and solution-focused.
+
+        Create a response that de-escalates the situation and shows the customer we take their concern seriously.
+        """
+
+        result = escalation_agent.kickoff(query, response_format=FinalResponse)
+
+        print("\n" + "=" * 60)
+        print("[ESCALATION] Manager Response:")
+        print(result.pydantic.final_response)
+        print("=" * 60)
+
+        self.state.final_response = result.pydantic
+        return self.state.final_response
+
+    @listen("fallback")
+    def handle_fallback(self):
+        print("[FALLBACK] Processing unclear or general request...")
+
+        fallback_agent = Agent(
+            role="General Support Agent",
+            goal="Assist with general inquiries and clarify unclear requests",
+            backstory=(
+                "You are a friendly and helpful support agent who assists customers when their request "
+                "doesn't fit a specific category or needs clarification. You ask clarifying questions "
+                "and guide customers to the right service."
+            ),
+            verbose=True,
+            llm=llm,
+        )
+
+        query = f"""
+        Customer message: '{self.state.customer_message}'
+        Classification: {self.state.classification.intent}
+        Confidence: {self.state.classification.confidence}
+
+        Your task:
+        1. If the intent is unclear, politely ask clarifying questions to understand what the customer needs.
+        2. If it's a general question, provide helpful information or guide them to the right department.
+        3. Offer specific options: "Would you like to see our menu, place an order, or make a reservation?"
+        4. Keep the tone friendly, patient, and helpful.
+        5. If you can partially address their request, do so while asking for clarification on unclear parts.
+
+        Create a response that helps the customer get what they need or guides them to provide more information.
+        """
+
+        result = fallback_agent.kickoff(query, response_format=FinalResponse)
+
+        print("\n" + "=" * 60)
+        print("[FALLBACK] Support Response:")
+        print(result.pydantic.final_response)
+        print("=" * 60)
+
+        self.state.final_response = result.pydantic
+        return self.state.final_response
 
     @listen(or_(handle_menu, handle_order, handle_reservation))
     def deliver_response(self):
