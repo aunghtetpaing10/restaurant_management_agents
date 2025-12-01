@@ -1,4 +1,5 @@
 import ast
+import json
 import re
 from datetime import datetime
 from typing import Type
@@ -20,11 +21,7 @@ class MenuSearchTool(BaseTool):
     """Search restaurant menu items and return matching dishes."""
 
     name: str = "menu_search"
-    description: str = (
-        "Use this tool to answer guest questions about menu items. It queries the restaurant"
-        " SQLite database (through the MCP SQLite server) and returns matching dishes with"
-        " category, price, availability, and description."
-    )
+    description: str = "Search menu items by query. Returns name, category, price, availability, description."
     args_schema: Type[BaseModel] = MenuSearchInput
 
     def _run(self, query: str) -> str:
@@ -52,7 +49,7 @@ class MenuSearchTool(BaseTool):
         cleaned_query = query.replace("'", "''")
 
         sql = (
-            "SELECT name, category, price, description, is_available "
+            "SELECT id, name, category, price, description, is_available "
             "FROM menu_items "
             f"WHERE (name LIKE '%{cleaned_query}%' OR description LIKE '%{cleaned_query}%' OR category LIKE '%{cleaned_query}%')"
         )
@@ -94,7 +91,7 @@ class MenuSearchTool(BaseTool):
                 price_text = f"${float(price_value):.2f}"
 
             line = (
-                f"{item.get('name', 'Unknown')} ({item.get('category', 'Unknown')}): "
+                f"ID: {item.get('id', 'N/A')} | {item.get('name', 'Unknown')} ({item.get('category', 'Unknown')}): "
                 f"{price_text} - {availability}. "
                 f"{item.get('description', 'No description provided.')}"
             )
@@ -110,19 +107,19 @@ class OrderLookupInput(BaseModel):
         ...,
         description="Action to perform: 'create' to create new order, 'lookup_by_id' to check status by order ID, 'lookup_by_phone' to check status by phone number",
     )
-    customer_id: int = Field(
+    customer_id: int | None = Field(
         default=None,
         description="ID of the customer (required for 'create' action)",
     )
-    items: str = Field(
+    items: str | None = Field(
         default=None,
         description="JSON string of order items for 'create' action: [{\"menu_item_id\": 1, \"quantity\": 2}, ...]",
     )
-    order_id: int = Field(
+    order_id: int | None = Field(
         default=None,
         description="Order ID to lookup (required for 'lookup_by_id' action)",
     )
-    phone: str = Field(
+    phone: str | None = Field(
         default=None,
         description="Customer phone number to lookup orders (required for 'lookup_by_phone' action)",
     )
@@ -132,14 +129,7 @@ class OrderLookupTool(BaseTool):
     """Create orders and check order status in the database."""
 
     name: str = "order_lookup"
-    description: str = (
-        "Use this tool to create new orders OR check order status. "
-        "Actions: "
-        "1. 'create' - Create new order (requires customer_id and items). "
-        "2. 'lookup_by_id' - Check order status by order ID. "
-        "3. 'lookup_by_phone' - Check all orders for a phone number. "
-        "Returns order details including status, items, and total."
-    )
+    description: str = "Create orders or check status. Actions: 'create' (needs customer_id, items), 'lookup_by_id' (needs order_id), 'lookup_by_phone' (needs phone)."
     args_schema: Type[BaseModel] = OrderLookupInput
 
     def _run(
@@ -198,28 +188,59 @@ class OrderLookupTool(BaseTool):
 
         # Parse items JSON
         try:
-            import json
-
             items_list = json.loads(items)
         except json.JSONDecodeError as e:
             return f"OrderManagementTool error: Invalid items JSON - {str(e)}"
 
-        # Calculate total price first
+        # Normalize and validate items, and calculate total price
+        normalized_items = []
         total_price = 0.0
-        for item in items_list:
-            menu_item_id = item.get("menu_item_id")
-            quantity = item.get("quantity", 1)
+        for raw_item in items_list:
+            menu_item_id = raw_item.get("menu_item_id")
+            if menu_item_id is None:
+                return "OrderManagementTool error: Each item requires a menu_item_id."
 
-            # Get price from menu_items
-            price_sql = f"SELECT price FROM menu_items WHERE id = {menu_item_id}"
+            try:
+                menu_item_id = int(menu_item_id)
+            except (TypeError, ValueError):
+                return f"OrderManagementTool error: menu_item_id '{menu_item_id}' must be an integer."
+
+            quantity = raw_item.get("quantity", 1)
+            try:
+                quantity = int(quantity)
+            except (TypeError, ValueError):
+                quantity = 1
+            if quantity <= 0:
+                quantity = 1
+
+            price_sql = f"SELECT name, price FROM menu_items WHERE id = {menu_item_id}"
             try:
                 price_response = read_query_tool.run(query=price_sql)
                 price_results = ast.literal_eval(price_response)
-                if price_results:
-                    price = float(price_results[0].get("price", 0))
-                    total_price += price * quantity
             except Exception as e:
                 return f"OrderManagementTool error: Failed to get price for item {menu_item_id} - {str(e)}"
+
+            if not price_results:
+                return f"OrderManagementTool error: Menu item with id {menu_item_id} not found."
+
+            menu_name = price_results[0].get("name", "Unknown Item")
+            try:
+                unit_price = float(price_results[0].get("price", 0))
+            except (TypeError, ValueError):
+                unit_price = 0.0
+
+            line_total = unit_price * quantity
+            total_price += line_total
+
+            normalized_items.append(
+                {
+                    "menu_item_id": menu_item_id,
+                    "menu_name": menu_name,
+                    "unit_price": unit_price,
+                    "quantity": quantity,
+                    "line_total": line_total,
+                }
+            )
 
         # Create order
         create_order_sql = (
@@ -245,18 +266,10 @@ class OrderLookupTool(BaseTool):
             return f"OrderManagementTool error: Failed to get order ID - {str(e)}"
 
         # Insert order items
-        for item in items_list:
-            menu_item_id = item.get("menu_item_id")
-            quantity = item.get("quantity", 1)
-
-            # Get price again for order_items
-            price_sql = f"SELECT price FROM menu_items WHERE id = {menu_item_id}"
-            try:
-                price_response = read_query_tool.run(query=price_sql)
-                price_results = ast.literal_eval(price_response)
-                price = float(price_results[0].get("price", 0))
-            except Exception:
-                price = 0.0
+        for item in normalized_items:
+            menu_item_id = item["menu_item_id"]
+            quantity = item["quantity"]
+            price = item["unit_price"]
 
             insert_item_sql = (
                 f"INSERT INTO order_items (order_id, menu_item_id, quantity, price) "
@@ -268,14 +281,24 @@ class OrderLookupTool(BaseTool):
             except Exception as e:
                 return f"OrderManagementTool error: Failed to add item {menu_item_id} - {str(e)}"
 
-        return (
-            f"Order created successfully!\n"
-            f"Order ID: {order_id}\n"
-            f"Customer ID: {customer_id}\n"
-            f"Total Price: ${total_price:.2f}\n"
-            f"Status: In Progress\n"
-            f"Items: {len(items_list)}"
-        )
+        structured_summary = {
+            "order_id": order_id,
+            "customer_id": customer_id,
+            "status": "in_progress",
+            "total_amount": round(total_price, 2),
+            "items": [
+                {
+                    "menu_item_id": item["menu_item_id"],
+                    "menu": item["menu_name"],
+                    "quantity": item["quantity"],
+                    "unit_price": f"${item['unit_price']:.2f}",
+                    "line_total": f"${item['line_total']:.2f}",
+                }
+                for item in normalized_items
+            ],
+        }
+
+        return f"Order #{order_id} created. Total: ${total_price:.2f}. Status: in_progress.\nJSON_SUMMARY:\n{json.dumps(structured_summary, ensure_ascii=False)}"
 
     def _lookup_by_id(self, order_id: int, read_query_tool) -> str:
         """Look up order status by order ID."""
@@ -383,6 +406,91 @@ class OrderLookupTool(BaseTool):
         return response.strip()
 
 
+class CustomerLookupInput(BaseModel):
+    """Input schema for CustomerLookupTool."""
+
+    query: str = Field(
+        ..., description="Customer phone number, email, or name to search for"
+    )
+
+
+class CustomerLookupTool(BaseTool):
+    """Search for customers by phone, email, or name."""
+
+    name: str = "customer_lookup"
+    description: str = "Search for customer information by phone, email, or name. Returns customer ID and contact details."
+    args_schema: Type[BaseModel] = CustomerLookupInput
+
+    def _run(self, query: str) -> str:
+        from restaurant_flow.mcp_init import get_mcp_tools
+
+        try:
+            tools = get_mcp_tools()
+        except Exception as e:
+            return f"CustomerLookupTool error: Failed to initialize MCP tools - {str(e)}"
+
+        read_query_tool = None
+        try:
+            for tool in tools:
+                if hasattr(tool, "name") and tool.name == "read_query":
+                    read_query_tool = tool
+                    break
+        except Exception as e:
+            return f"CustomerLookupTool error: Failed to find read_query tool - {str(e)}"
+
+        if read_query_tool is None:
+            return "CustomerLookupTool error: read_query tool is not available from MCP server."
+
+        cleaned_query = query.replace("'", "''")
+
+        # Handle full names by searching in concatenated first_name and last_name
+        sql = (
+            "SELECT id, first_name, last_name, email, phone "
+            "FROM customers "
+            f"WHERE phone LIKE '%{cleaned_query}%' "
+            f"OR email LIKE '%{cleaned_query}%' "
+            f"OR first_name LIKE '%{cleaned_query}%' "
+            f"OR last_name LIKE '%{cleaned_query}%' "
+            f"OR (first_name || ' ' || last_name) LIKE '%{cleaned_query}%'"
+        )
+
+        sql += " LIMIT 5"
+
+        try:
+            response = read_query_tool.run(query=sql)
+        except Exception as e:
+            return f"CustomerLookupTool error: Failed to execute query - {str(e)}"
+
+        try:
+            if isinstance(response, str):
+                results = ast.literal_eval(response)
+            elif isinstance(response, list):
+                results = response
+            elif isinstance(response, dict):
+                if not response.get("success", True):
+                    return f"CustomerLookupTool error: {response.get('error', 'Unknown error')}"
+                results = response.get("results", response.get("data", []))
+            else:
+                return f"CustomerLookupTool received unexpected response format: {type(response).__name__}"
+        except (ValueError, SyntaxError) as e:
+            return f"CustomerLookupTool error: Failed to parse response - {str(e)}"
+
+        if not results:
+            return "No customers found matching that query."
+
+        lines = []
+        for customer in results:
+            line = (
+                f"ID: {customer.get('id', 'N/A')} | "
+                f"{customer.get('first_name', '')} {customer.get('last_name', '')} | "
+                f"Phone: {customer.get('phone', 'N/A')} | "
+                f"Email: {customer.get('email', 'N/A')}"
+            )
+            lines.append(line)
+
+        return "\n".join(lines)
+
+
 class ReservationLookupInput(BaseModel):
     """Input schema for ReservationLookupTool."""
 
@@ -424,14 +532,7 @@ class ReservationLookupTool(BaseTool):
     """Create reservations and check reservation status in the database."""
 
     name: str = "reservation_lookup"
-    description: str = (
-        "Use this tool to create new reservations OR check reservation status. "
-        "Actions: "
-        "1. 'create' - Create new reservation (requires customer_id, party_size, date, time). "
-        "2. 'lookup_by_id' - Check reservation status by reservation ID. "
-        "3. 'lookup_by_phone' - Check all reservations for a phone number. "
-        "Returns reservation details including status, date, time, and party size."
-    )
+    description: str = "Create reservations or check status. Actions: 'create' (needs customer_id, party_size, date, time), 'lookup_by_id' (needs reservation_id), 'lookup_by_phone' (needs phone)."
     args_schema: Type[BaseModel] = ReservationLookupInput
 
     def _run(
@@ -563,15 +664,7 @@ class ReservationLookupTool(BaseTool):
                 "Please verify the reservation manually."
             )
 
-        return (
-            f"Reservation created successfully!\n"
-            f"Reservation ID: {reservation_id}\n"
-            f"Customer ID: {customer_id}\n"
-            f"Party Size: {party_size}\n"
-            f"Date: {normalized_date}\n"
-            f"Time: {normalized_time}\n"
-            f"Status: Confirmed"
-        )
+        return f"Reservation #{reservation_id} created. Party: {party_size}. Date: {normalized_date} {normalized_time}. Status: confirmed."
 
     def _normalize_date(self, raw_date: str | None) -> str | None:
         if not raw_date:
