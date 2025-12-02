@@ -5,6 +5,27 @@ from typing import List
 from pydantic import BaseModel, Field
 
 
+class MemoryKeys:
+    """Centralized memory keys for customer preferences."""
+    
+    # Order-related
+    LAST_ORDER_ID = "last_order_id"
+    RECENT_ITEMS = "recent_items"
+    FAVORITE_ITEMS = "favorite_items"
+    
+    # Reservation-related
+    LAST_RESERVATION_ID = "last_reservation_id"
+    USUAL_PARTY_SIZE = "usual_party_size"
+    LAST_RESERVATION_TIME = "last_reservation_time"
+    
+    # Menu-related
+    RECENT_MENU_SEARCHES = "recent_menu_searches"
+    
+    # Dietary preferences
+    DIETARY_RESTRICTIONS = "dietary_restrictions"
+    ALLERGIES = "allergies"
+
+
 class IntentClassification(BaseModel):
     """Intent classifier structured output."""
 

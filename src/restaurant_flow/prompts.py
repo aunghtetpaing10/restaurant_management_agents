@@ -21,11 +21,13 @@ Set confidence: high/medium/low.
 """
 
 
-def get_menu_inquiry_prompt(customer_message: str) -> str:
+def get_menu_inquiry_prompt(customer_message: str, context: str = "") -> str:
     """Generate the menu inquiry prompt."""
-    return f"""Customer: {customer_message}
+    context_section = f"\nContext: {context}" if context and context != "New customer - no previous history." else ""
+    return f"""Customer: {customer_message}{context_section}
 
 Use menu_search tool to find matching items. Return dish names and prices.
+If customer has dietary restrictions or allergies in context, prioritize suitable items.
 """
 
 
@@ -42,12 +44,14 @@ MANDATORY STEPS FOR NEW ORDERS:
 
 3. Use menu_search for EACH item to get menu_item_id and exact price
 
-4. CREATE the order by calling order_lookup with:
+4. If customer has dietary restrictions or allergies in context, WARN if ordered items may conflict
+
+5. CREATE the order by calling order_lookup with:
    - action='create'
    - customer_id=<from step 2>
    - items='[{{"menu_item_id": <id>, "quantity": <n>}}]'
 
-5. Return the created order with order_id from the response
+6. Return the created order with order_id from the response
 
 RESPONSE FORMAT:
 - order_id: the ID returned from order_lookup create action

@@ -9,6 +9,7 @@ from restaurant_flow.models import (
     ReservationResponse,
     FinalResponse,
     RestaurantState,
+    MemoryKeys,
 )
 from restaurant_flow.prompts import (
     get_intent_classification_prompt,
@@ -51,6 +52,38 @@ def retry_agent_call(agent_func, max_retries=2, delay=1):
 
 
 class RestaurantFlow(Flow[RestaurantState]):
+    # Dietary keywords to detect in messages
+    DIETARY_KEYWORDS = {
+        "vegetarian": "vegetarian",
+        "vegan": "vegan",
+        "gluten-free": "gluten-free",
+        "gluten free": "gluten-free",
+        "dairy-free": "dairy-free",
+        "dairy free": "dairy-free",
+        "halal": "halal",
+        "kosher": "kosher",
+        "pescatarian": "pescatarian",
+        "keto": "keto",
+        "low-carb": "low-carb",
+    }
+    
+    ALLERGY_KEYWORDS = {
+        "nut allergy": "nuts",
+        "peanut allergy": "peanuts",
+        "allergic to nuts": "nuts",
+        "allergic to peanuts": "peanuts",
+        "allergic to shellfish": "shellfish",
+        "shellfish allergy": "shellfish",
+        "allergic to dairy": "dairy",
+        "lactose intolerant": "dairy",
+        "allergic to gluten": "gluten",
+        "celiac": "gluten",
+        "allergic to eggs": "eggs",
+        "egg allergy": "eggs",
+        "allergic to soy": "soy",
+        "soy allergy": "soy",
+    }
+
     def _extract_customer_id(self) -> int | None:
         """Extract customer ID from message if customer name is mentioned.
 
@@ -81,6 +114,42 @@ class RestaurantFlow(Flow[RestaurantState]):
 
         return None
 
+    def _extract_dietary_info(self) -> tuple[list[str], list[str]]:
+        """Extract dietary restrictions and allergies from customer message.
+        
+        Returns tuple of (dietary_restrictions, allergies).
+        """
+        message_lower = self.state.customer_message.lower()
+        
+        # Detect dietary restrictions
+        dietary = []
+        for keyword, normalized in self.DIETARY_KEYWORDS.items():
+            if keyword in message_lower and normalized not in dietary:
+                dietary.append(normalized)
+        
+        # Detect allergies
+        allergies = []
+        for keyword, normalized in self.ALLERGY_KEYWORDS.items():
+            if keyword in message_lower and normalized not in allergies:
+                allergies.append(normalized)
+        
+        return dietary, allergies
+
+    def _save_dietary_info(self):
+        """Detect and save dietary info from current message."""
+        if not self.state.current_customer_id:
+            return
+            
+        dietary, allergies = self._extract_dietary_info()
+        
+        if dietary:
+            self._update_memory(MemoryKeys.DIETARY_RESTRICTIONS, ", ".join(dietary))
+            print(f"[MEMORY] Detected dietary restrictions: {dietary}")
+            
+        if allergies:
+            self._update_memory(MemoryKeys.ALLERGIES, ", ".join(allergies))
+            print(f"[MEMORY] Detected allergies: {allergies}")
+
     def _update_memory(self, key: str, value: str):
         """Save customer preference to database."""
         if not self.state.current_customer_id:
@@ -97,9 +166,9 @@ class RestaurantFlow(Flow[RestaurantState]):
         print(f"[MEMORY] {result}")
 
     def _get_context_summary(self) -> str:
-        """Get customer preferences from database."""
+        """Get customer preferences from database in agent-friendly format."""
         if not self.state.current_customer_id:
-            return "No previous context."
+            return "New customer - no previous history."
 
         # Get preferences from database
         pref_tool = CustomerPreferenceTool()
@@ -108,9 +177,35 @@ class RestaurantFlow(Flow[RestaurantState]):
         )
 
         if prefs_result.startswith("No preferences"):
-            return "No previous context."
+            return "New customer - no previous history."
 
-        return prefs_result
+        # Parse and format as structured context
+        context_lines = ["Customer History:"]
+        for line in prefs_result.split("\n"):
+            if ":" in line and not line.startswith("Preferences"):
+                key, value = line.strip().split(":", 1)
+                key = key.strip()
+                value = value.strip()
+                
+                # Format based on key type for better agent understanding
+                if key == MemoryKeys.LAST_ORDER_ID:
+                    context_lines.append(f"- Last order ID: #{value}")
+                elif key == MemoryKeys.RECENT_ITEMS:
+                    context_lines.append(f"- Recently ordered: {value}")
+                elif key == MemoryKeys.LAST_RESERVATION_ID:
+                    context_lines.append(f"- Last reservation ID: #{value}")
+                elif key == MemoryKeys.USUAL_PARTY_SIZE:
+                    context_lines.append(f"- Usual party size: {value} people")
+                elif key == MemoryKeys.RECENT_MENU_SEARCHES:
+                    context_lines.append(f"- Recently browsed: {value}")
+                elif key == MemoryKeys.DIETARY_RESTRICTIONS:
+                    context_lines.append(f"- Dietary restrictions: {value}")
+                elif key == MemoryKeys.ALLERGIES:
+                    context_lines.append(f"- Allergies: {value}")
+                else:
+                    context_lines.append(f"- {key}: {value}")
+
+        return "\n".join(context_lines) if len(context_lines) > 1 else "New customer - no previous history."
 
     def _format_specialist_data(self) -> str:
         """Format specialist response data for the response composer."""
@@ -153,12 +248,15 @@ class RestaurantFlow(Flow[RestaurantState]):
 
     @start()
     def receive_message(self):
-        """Entry point for the flow. Extracts customer ID if mentioned in message."""
+        """Entry point for the flow. Extracts customer ID and dietary info if mentioned."""
         print("Starting the structured flow")
 
         # Extract customer_id early if customer name is mentioned
         if not self.state.current_customer_id:
             self.state.current_customer_id = self._extract_customer_id()
+
+        # Detect and save dietary preferences/allergies from message
+        self._save_dietary_info()
 
     @router(receive_message)
     def classify_intent(self):
@@ -218,7 +316,8 @@ class RestaurantFlow(Flow[RestaurantState]):
         print("[MENU] Processing menu inquiry...")
 
         menu_specialist = create_menu_specialist()
-        query = get_menu_inquiry_prompt(self.state.customer_message)
+        context = self._get_context_summary()
+        query = get_menu_inquiry_prompt(self.state.customer_message, context)
 
         try:
             result = retry_agent_call(
@@ -226,6 +325,12 @@ class RestaurantFlow(Flow[RestaurantState]):
             )
             print(f"[MENU] Found {len(result.pydantic.menu_items)} items")
             self.state.menu_response = result.pydantic
+
+            # Save menu search to memory (track what customer is interested in)
+            if self.state.current_customer_id and result.pydantic.menu_items:
+                recent_searches = ", ".join(result.pydantic.menu_items[:3])
+                self._update_memory(MemoryKeys.RECENT_MENU_SEARCHES, recent_searches)
+
         except Exception as e:
             print(f"[MENU] Error processing menu inquiry: {str(e)}")
             # Create error response
@@ -259,10 +364,10 @@ class RestaurantFlow(Flow[RestaurantState]):
 
             # Save order preferences to memory
             if result.pydantic.order_id:
-                self._update_memory("last_order_id", str(result.pydantic.order_id))
+                self._update_memory(MemoryKeys.LAST_ORDER_ID, str(result.pydantic.order_id))
             if result.pydantic.items_ordered:
                 items = ", ".join([item.menu for item in result.pydantic.items_ordered])
-                self._update_memory("recent_items", items)
+                self._update_memory(MemoryKeys.RECENT_ITEMS, items)
 
         except Exception as e:
             print(f"[ORDER] Error processing order: {str(e)}")
@@ -305,13 +410,13 @@ class RestaurantFlow(Flow[RestaurantState]):
             # Save reservation preferences to memory
             if result.pydantic.reservation_id:
                 self._update_memory(
-                    "last_reservation_id", str(result.pydantic.reservation_id)
+                    MemoryKeys.LAST_RESERVATION_ID, str(result.pydantic.reservation_id)
                 )
             if result.pydantic.party_size:
-                self._update_memory("usual_party_size", str(result.pydantic.party_size))
+                self._update_memory(MemoryKeys.USUAL_PARTY_SIZE, str(result.pydantic.party_size))
             if result.pydantic.reservation_datetime:
                 self._update_memory(
-                    "last_reservation_time", result.pydantic.reservation_datetime
+                    MemoryKeys.LAST_RESERVATION_TIME, result.pydantic.reservation_datetime
                 )
 
         except Exception as e:
