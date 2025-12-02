@@ -126,3 +126,19 @@ def create_response_composer(llm: LLM | None = None) -> Agent:
         llm=llm,
         max_iter=3,
     )
+
+
+def create_clarification_agent(llm: LLM | None = None) -> Agent:
+    """Create the clarification agent for multi-turn conversations."""
+    if llm is None:
+        llm = get_llm()
+        
+    return Agent(
+        role="Conversation Analyzer",
+        goal="Analyze conversations to extract info and determine if clarification is needed before processing",
+        backstory="You analyze customer conversations to extract key information (names, items, dates, party sizes). You determine if enough info exists to proceed or if clarifying questions are needed. Be friendly when asking for missing info.",
+        verbose=True,
+        llm=llm,
+        max_iter=2,
+        memory=True
+    )

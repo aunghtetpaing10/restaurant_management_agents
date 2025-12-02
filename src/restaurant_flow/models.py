@@ -7,20 +7,20 @@ from pydantic import BaseModel, Field
 
 class MemoryKeys:
     """Centralized memory keys for customer preferences."""
-    
+
     # Order-related
     LAST_ORDER_ID = "last_order_id"
     RECENT_ITEMS = "recent_items"
     FAVORITE_ITEMS = "favorite_items"
-    
+
     # Reservation-related
     LAST_RESERVATION_ID = "last_reservation_id"
     USUAL_PARTY_SIZE = "usual_party_size"
     LAST_RESERVATION_TIME = "last_reservation_time"
-    
+
     # Menu-related
     RECENT_MENU_SEARCHES = "recent_menu_searches"
-    
+
     # Dietary preferences
     DIETARY_RESTRICTIONS = "dietary_restrictions"
     ALLERGIES = "allergies"
@@ -132,3 +132,67 @@ class RestaurantState(BaseModel):
     current_customer_id: int | None = Field(
         default=None, description="Database ID of current customer for memory tracking"
     )
+
+
+class ConversationMessage(BaseModel):
+    """Single message in a conversation."""
+
+    role: str = Field(description="Message role: 'user' or 'assistant'")
+    content: str = Field(description="Message content")
+
+
+class ClarificationAnalysis(BaseModel):
+    """LLM analysis of whether clarification is needed."""
+
+    intent: str = Field(
+        description="Detected intent: menu_inquiry, order_request, reservation_request, general_question, complaint, other"
+    )
+    is_ready: bool = Field(
+        description="True if we have enough info to proceed with the flow"
+    )
+    missing_info: List[str] = Field(
+        default_factory=list,
+        description="List of missing required information (e.g., ['customer_name', 'party_size'])",
+    )
+    clarification_question: str = Field(
+        default="",
+        description="Natural question to ask user for missing info. Empty if is_ready=True",
+    )
+    collected_info: dict = Field(
+        default_factory=dict,
+        description="Info extracted so far: {customer_name, items, party_size, date_time, etc.}",
+    )
+
+
+class ConversationState(BaseModel):
+    """State for a multi-turn conversation session."""
+
+    session_id: str = Field(description="Unique session identifier")
+    customer_id: int | None = Field(
+        default=None, description="Customer ID if identified"
+    )
+    messages: List[ConversationMessage] = Field(
+        default_factory=list, description="Conversation history"
+    )
+    current_intent: str | None = Field(
+        default=None, description="Detected intent from conversation"
+    )
+    collected_info: dict = Field(
+        default_factory=dict,
+        description="Accumulated info from conversation: {customer_name, items, party_size, etc.}",
+    )
+    status: str = Field(
+        default="gathering_info",
+        description="Session status: 'gathering_info' or 'ready_to_process'",
+    )
+
+
+# Required info per intent type
+REQUIRED_INFO = {
+    "order_request": ["customer_name", "items"],
+    "reservation_request": ["customer_name", "party_size", "date_time"],
+    "menu_inquiry": [],  # No requirements - can proceed immediately
+    "general_question": [],
+    "complaint": [],
+    "other": [],
+}

@@ -497,12 +497,48 @@ class RestaurantFlow(Flow[RestaurantState]):
 
 
 def kickoff():
-    """Run the restaurant flow with proper MCP cleanup."""
+    """Run the restaurant flow with proper MCP cleanup (single-shot mode)."""
     from restaurant_flow.mcp_init import close_mcp_tools
 
     try:
         restaurant_flow = RestaurantFlow()
         restaurant_flow.kickoff()
+    finally:
+        close_mcp_tools()
+
+
+def chat():
+    """Run interactive multi-turn chat mode."""
+    from restaurant_flow.mcp_init import close_mcp_tools
+    from restaurant_flow.conversation import ConversationManager
+
+    manager = ConversationManager()
+    session_id = "interactive"
+
+    print("=" * 60)
+    print("Restaurant Assistant (Multi-turn Chat)")
+    print("Type 'quit' to exit, 'reset' to start over")
+    print("=" * 60)
+
+    try:
+        while True:
+            user_input = input("\nYou: ").strip()
+            
+            if user_input.lower() in ["quit", "exit", "q"]:
+                print("Goodbye!")
+                break
+            
+            if user_input.lower() == "reset":
+                manager.reset_session(session_id)
+                print("Session reset. Starting fresh!")
+                continue
+            
+            if not user_input:
+                continue
+
+            response = manager.chat(user_input, session_id)
+            print(f"\nAssistant: {response}")
+
     finally:
         close_mcp_tools()
 
@@ -514,4 +550,9 @@ def plot():
 
 
 if __name__ == "__main__":
-    kickoff()
+    import sys
+    
+    if len(sys.argv) > 1 and sys.argv[1] == "chat":
+        chat()
+    else:
+        kickoff()

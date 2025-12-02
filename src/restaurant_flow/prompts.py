@@ -116,3 +116,35 @@ Data: {specialist_data}
 
 Compose a friendly, professional response addressing the customer's request. Include next steps.
 """
+
+
+def get_clarification_prompt(conversation_history: str, latest_message: str) -> str:
+    """Generate prompt for analyzing if clarification is needed."""
+    return f"""Analyze this restaurant conversation and determine if we have enough info to proceed.
+
+CONVERSATION HISTORY:
+{conversation_history}
+
+LATEST MESSAGE: "{latest_message}"
+
+REQUIRED INFO BY INTENT:
+- order_request: customer_name, items (what they want to order)
+- reservation_request: customer_name, party_size, date_time
+- menu_inquiry: nothing required (can proceed immediately)
+- general_question: nothing required
+- complaint: nothing required
+
+INSTRUCTIONS:
+1. Identify the customer's intent
+2. Extract any info provided so far (customer_name, items, party_size, date_time, etc.)
+3. Check if all required info for that intent is available
+4. If missing info, generate a natural clarifying question
+5. Set is_ready=true ONLY if all required info is present
+
+RESPONSE FORMAT:
+- intent: detected intent
+- is_ready: true/false
+- missing_info: list of what's still needed
+- clarification_question: friendly question to ask (empty if ready)
+- collected_info: dict of extracted info
+"""
