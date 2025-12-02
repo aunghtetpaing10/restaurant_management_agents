@@ -28,7 +28,9 @@ from restaurant_flow.agents import (
     create_escalation_agent,
     create_fallback_agent,
     create_response_composer,
+    create_clarification_agent,
 )
+from restaurant_flow.models import ClarificationAnalysis, REQUIRED_INFO
 from restaurant_flow.tools.custom_tool import CustomerLookupTool
 from restaurant_flow.tools.preference_tools import CustomerPreferenceTool
 
@@ -167,45 +169,50 @@ class RestaurantFlow(Flow[RestaurantState]):
 
     def _get_context_summary(self) -> str:
         """Get customer preferences from database in agent-friendly format."""
-        if not self.state.current_customer_id:
+        context_lines: list[str] = []
+
+        # Add database-backed customer history when we have a customer_id
+        if self.state.current_customer_id:
+            pref_tool = CustomerPreferenceTool()
+            prefs_result = pref_tool._run(
+                action="get_all", customer_id=self.state.current_customer_id
+            )
+
+            if not prefs_result.startswith("No preferences"):
+                context_lines.append("Customer History:")
+                for line in prefs_result.split("\n"):
+                    if ":" in line and not line.startswith("Preferences"):
+                        key, value = line.strip().split(":", 1)
+                        key = key.strip()
+                        value = value.strip()
+
+                        if key == MemoryKeys.LAST_ORDER_ID:
+                            context_lines.append(f"- Last order ID: #{value}")
+                        elif key == MemoryKeys.RECENT_ITEMS:
+                            context_lines.append(f"- Recently ordered: {value}")
+                        elif key == MemoryKeys.LAST_RESERVATION_ID:
+                            context_lines.append(f"- Last reservation ID: #{value}")
+                        elif key == MemoryKeys.USUAL_PARTY_SIZE:
+                            context_lines.append(f"- Usual party size: {value} people")
+                        elif key == MemoryKeys.RECENT_MENU_SEARCHES:
+                            context_lines.append(f"- Recently browsed: {value}")
+                        elif key == MemoryKeys.DIETARY_RESTRICTIONS:
+                            context_lines.append(f"- Dietary restrictions: {value}")
+                        elif key == MemoryKeys.ALLERGIES:
+                            context_lines.append(f"- Allergies: {value}")
+                        else:
+                            context_lines.append(f"- {key}: {value}")
+
+        # Add structured clarification info when available (from interactive gather phase)
+        if getattr(self.state, "clarification_info", None):
+            context_lines.append("Clarification Info:")
+            for key, value in self.state.clarification_info.items():
+                context_lines.append(f"- {key}: {value}")
+
+        if not context_lines:
             return "New customer - no previous history."
 
-        # Get preferences from database
-        pref_tool = CustomerPreferenceTool()
-        prefs_result = pref_tool._run(
-            action="get_all", customer_id=self.state.current_customer_id
-        )
-
-        if prefs_result.startswith("No preferences"):
-            return "New customer - no previous history."
-
-        # Parse and format as structured context
-        context_lines = ["Customer History:"]
-        for line in prefs_result.split("\n"):
-            if ":" in line and not line.startswith("Preferences"):
-                key, value = line.strip().split(":", 1)
-                key = key.strip()
-                value = value.strip()
-                
-                # Format based on key type for better agent understanding
-                if key == MemoryKeys.LAST_ORDER_ID:
-                    context_lines.append(f"- Last order ID: #{value}")
-                elif key == MemoryKeys.RECENT_ITEMS:
-                    context_lines.append(f"- Recently ordered: {value}")
-                elif key == MemoryKeys.LAST_RESERVATION_ID:
-                    context_lines.append(f"- Last reservation ID: #{value}")
-                elif key == MemoryKeys.USUAL_PARTY_SIZE:
-                    context_lines.append(f"- Usual party size: {value} people")
-                elif key == MemoryKeys.RECENT_MENU_SEARCHES:
-                    context_lines.append(f"- Recently browsed: {value}")
-                elif key == MemoryKeys.DIETARY_RESTRICTIONS:
-                    context_lines.append(f"- Dietary restrictions: {value}")
-                elif key == MemoryKeys.ALLERGIES:
-                    context_lines.append(f"- Allergies: {value}")
-                else:
-                    context_lines.append(f"- {key}: {value}")
-
-        return "\n".join(context_lines) if len(context_lines) > 1 else "New customer - no previous history."
+        return "\n".join(context_lines)
 
     def _format_specialist_data(self) -> str:
         """Format specialist response data for the response composer."""
@@ -246,10 +253,163 @@ class RestaurantFlow(Flow[RestaurantState]):
             """
         return ""
 
+    def _gather_info_interactive(self) -> tuple[str, str]:
+        """Gather required info from user via clarification loop.
+
+        Returns a tuple of (final_message, detected_intent).
+        """
+        from restaurant_flow.prompts import get_clarification_prompt
+        
+        conversation_history = []
+        collected_info = {}
+        current_message = self.state.customer_message
+        
+        while True:
+            # Format history for prompt
+            history_str = "\n".join(conversation_history) if conversation_history else "(No previous messages)"
+            
+            # Analyze with clarification agent
+            agent = create_clarification_agent()
+            prompt = get_clarification_prompt(history_str, current_message)
+            
+            try:
+                result = agent.kickoff(prompt, response_format=ClarificationAnalysis)
+                analysis = result.pydantic
+                
+                print(f"[GATHER] Intent: {analysis.intent} | Ready: {analysis.is_ready}")
+                print(f"[GATHER] Collected: {analysis.collected_info}")
+                
+                # Update collected info
+                collected_info.update(analysis.collected_info)
+                
+                # Check required fields for this intent
+                required_fields = REQUIRED_INFO.get(analysis.intent, [])
+                missing = [f for f in required_fields if not collected_info.get(f)]
+                
+                if not missing:
+                    # Ready to proceed - build final message and persist structured info
+                    final_message = self._build_final_message(
+                        analysis.intent, collected_info, current_message
+                    )
+                    # Store structured info on state so downstream agents can see it
+                    self.state.clarification_info = dict(collected_info)
+                    return final_message, analysis.intent
+                
+                # Need more info - ask user
+                question = (
+                    analysis.clarification_question
+                    or self._generate_question(analysis.intent, missing)
+                )
+                print(f"\nAssistant: {question}")
+                conversation_history.append(f"Customer: {current_message}")
+                conversation_history.append(f"Assistant: {question}")
+                
+                # Get user input
+                current_message = input("\nYou: ").strip()
+                if current_message.lower() in ["quit", "exit", "q"]:
+                    raise KeyboardInterrupt("User quit")
+                    
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                print(f"[GATHER] Error: {str(e)}")
+                # On error, just proceed with original message
+                return self.state.customer_message, "general_question"
+    
+    def _build_final_message(self, intent: str, info: dict, latest_message: str) -> str:
+        """Build combined message from collected info."""
+        # For simple intents, use latest message
+        if intent in {"menu_inquiry", "general_question", "complaint", "other"}:
+            return latest_message
+        
+        parts = []
+        if info.get("items"):
+            items = info["items"]
+            items_str = ", ".join(items) if isinstance(items, list) else items
+            parts.append(f"I want to order {items_str}")
+        
+        if info.get("customer_name"):
+            parts.append(f"for {info['customer_name']}")
+        
+        if info.get("party_size"):
+            parts.append(f"for {info['party_size']} people")
+        
+        if info.get("date_time"):
+            parts.append(f"at {info['date_time']}")
+        
+        return " ".join(parts) if parts else latest_message
+    
+    def _generate_question(self, intent: str, missing: list[str]) -> str:
+        """Generate clarifying question for missing fields."""
+        friendly = {
+            "customer_name": "your name",
+            "items": "what you'd like to order",
+            "party_size": "how many guests",
+            "date_time": "the date and time",
+        }
+        parts = [friendly.get(f, f.replace("_", " ")) for f in missing]
+        
+        if intent == "reservation_request":
+            prefix = "To book your table"
+        elif intent == "order_request":
+            prefix = "To place your order"
+        else:
+            prefix = "To help you"
+        
+        if len(parts) == 1:
+            return f"{prefix}, could you share {parts[0]}, please?"
+        return f"{prefix}, could you share {', '.join(parts[:-1])} and {parts[-1]}, please?"
+
     @start()
-    def receive_message(self):
-        """Entry point for the flow. Extracts customer ID and dietary info if mentioned."""
+    def classify_intent(self):
+        """Entry point: gather info (interactive) or classify intent (single-shot)."""
         print("Starting the structured flow")
+
+        classification: IntentClassification | None = None
+
+        if getattr(self, "_interactive_mode", False):
+            # Interactive mode: use clarification agent to gather info and intent
+            final_message, intent = self._gather_info_interactive()
+            self.state.customer_message = final_message
+
+            normalized_intent = intent.lower().strip() if intent else "other"
+            classification = IntentClassification(
+                intent=normalized_intent,
+                requires_escalation=normalized_intent in {"complaint"},
+                confidence="high",
+            )
+            print(
+                f"[CLASSIFY] (interactive) Intent: {classification.intent} | Escalation: {classification.requires_escalation} | Confidence: {classification.confidence}"
+            )
+        else:
+            # Single-shot mode: use dedicated intent classifier agent
+            print("[CLASSIFY] Classifying intent with agent...")
+
+            classifier = create_intent_classifier()
+            context = self._get_context_summary()
+            query = get_intent_classification_prompt(
+                self.state.customer_message, context
+            )
+
+            try:
+                result = retry_agent_call(
+                    lambda: classifier.kickoff(
+                        query, response_format=IntentClassification
+                    )
+                )
+                classification = result.pydantic
+                print(
+                    f"[CLASSIFY] Intent: {classification.intent} | Escalation: {classification.requires_escalation} | Confidence: {classification.confidence}"
+                )
+            except Exception as e:
+                print(f"[CLASSIFY] Critical error - defaulting to fallback: {str(e)}")
+                classification = IntentClassification(
+                    intent="other",
+                    requires_escalation=False,
+                    confidence="low",
+                )
+
+        self.state.classification = classification
 
         # Extract customer_id early if customer name is mentioned
         if not self.state.current_customer_id:
@@ -258,56 +418,41 @@ class RestaurantFlow(Flow[RestaurantState]):
         # Detect and save dietary preferences/allergies from message
         self._save_dietary_info()
 
-    @router(receive_message)
-    def classify_intent(self):
-        """Classify customer intent and route to appropriate handler."""
-        print("[CLASSIFY] Classifying intent with agent...")
-
-        classifier = create_intent_classifier()
-        context = self._get_context_summary()
-        query = get_intent_classification_prompt(self.state.customer_message, context)
-
-        try:
-            result = retry_agent_call(
-                lambda: classifier.kickoff(query, response_format=IntentClassification)
-            )
-            classification = result.pydantic
-            print(
-                f"[CLASSIFY] Intent: {classification.intent} | Escalation: {classification.requires_escalation} | Confidence: {classification.confidence}"
-            )
-            self.state.classification = classification
-        except Exception as e:
-            print(f"[CLASSIFY] Critical error - routing to fallback: {str(e)}")
-            # Fallback to general handler on critical failure
+    @router(classify_intent)
+    def route_intent(self):
+        """Route to appropriate handler based on stored classification."""
+        classification = self.state.classification
+        if not classification:
+            print("[ROUTER] Missing classification - routing to fallback handler")
             return "fallback"
 
         # Check for escalation first
         if classification.requires_escalation:
-            print("[CLASSIFY] ESCALATION REQUIRED - Routing to escalation handler")
+            print("[ROUTER] ESCALATION REQUIRED - Routing to escalation handler")
             return "escalation"
 
         intent = classification.intent.lower().strip()
         if intent in {"menu", "menu_inquiry"}:
-            print("[CLASSIFY] Routing to menu specialist")
+            print("[ROUTER] Routing to menu specialist")
             return "menu_inquiry"
         if intent in {"order", "order_request"}:
-            print("[CLASSIFY] Routing to order handler")
+            print("[ROUTER] Routing to order handler")
             return "order_request"
         if intent in {"reservation", "reservation_request"}:
-            print("[CLASSIFY] Routing to reservation agent")
+            print("[ROUTER] Routing to reservation agent")
             return "reservation_request"
         if intent in {"complaint"}:
-            print("[CLASSIFY] Complaint detected - Routing to escalation handler")
+            print("[ROUTER] Complaint detected - Routing to escalation handler")
             return "escalation"
         if intent in {"unclear"}:
-            print("[CLASSIFY] Unclear intent - Routing to fallback handler")
+            print("[ROUTER] Unclear intent - Routing to fallback handler")
             return "fallback"
         if intent in {"general_question", "other"}:
-            print("[CLASSIFY] General/other intent - Routing to fallback handler")
+            print("[ROUTER] General/other intent - Routing to fallback handler")
             return "fallback"
 
         # Final safety fallback
-        print("[CLASSIFY] Unrecognized intent - Routing to fallback handler")
+        print("[ROUTER] Unrecognized intent - routing to fallback handler")
         return "fallback"
 
     @listen("menu_inquiry")
@@ -508,16 +653,12 @@ def kickoff():
 
 
 def chat():
-    """Run interactive multi-turn chat mode."""
+    """Run interactive multi-turn chat mode with clarification built into flow."""
     from restaurant_flow.mcp_init import close_mcp_tools
-    from restaurant_flow.conversation import ConversationManager
-
-    manager = ConversationManager()
-    session_id = "interactive"
 
     print("=" * 60)
-    print("Restaurant Assistant (Multi-turn Chat)")
-    print("Type 'quit' to exit, 'reset' to start over")
+    print("Restaurant Assistant (Interactive Chat)")
+    print("Type 'quit' to exit")
     print("=" * 60)
 
     try:
@@ -528,16 +669,35 @@ def chat():
                 print("Goodbye!")
                 break
             
-            if user_input.lower() == "reset":
-                manager.reset_session(session_id)
-                print("Session reset. Starting fresh!")
-                continue
-            
             if not user_input:
                 continue
 
-            response = manager.chat(user_input, session_id)
-            print(f"\nAssistant: {response}")
+            # Create flow with interactive mode enabled
+            flow = RestaurantFlow()
+            flow._interactive_mode = True
+            
+            try:
+                # Kickoff will gather info interactively if needed
+                result = flow.kickoff(
+                    inputs={"customer_message": user_input}
+                )
+                
+                # Extract final response
+                if hasattr(result, "final_response"):
+                    response = result.final_response
+                elif isinstance(result, dict):
+                    response = result.get("final_response", str(result))
+                else:
+                    response = str(result)
+                
+                print(f"\nAssistant: {response}")
+                
+            except KeyboardInterrupt:
+                print("\n[Cancelled]")
+                continue
+            except Exception as e:
+                print(f"\n[Error] {str(e)}")
+                continue
 
     finally:
         close_mcp_tools()

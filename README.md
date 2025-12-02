@@ -1,56 +1,141 @@
-# {{crew_name}} Crew
+# RestaurantFlow – Multi-Agent Restaurant Assistant (Demo)
 
-Welcome to the {{crew_name}} Crew project, powered by [crewAI](https://crewai.com). This template is designed to help you set up a multi-agent AI system with ease, leveraging the powerful and flexible framework provided by crewAI. Our goal is to enable your agents to collaborate effectively on complex tasks, maximizing their collective intelligence and capabilities.
+This project is a **demo multi-agent system** for a restaurant assistant, built with [CrewAI Flow](https://crewai.com), SQLite, and MCP-compatible tools.
+
+It is designed to showcase your ability to:
+
+- **Design a restaurant database** and access it via MCP.
+- **Build custom tools** for menu search, order lookup, reservations, and preferences.
+- **Orchestrate multiple agents** (intent classifier, specialists, composer) in a Flow with conditional routing.
+- **Use Pydantic models** for structured outputs and state management.
+- **Add memory** to remember customer preferences across conversations.
+- **Support both single-shot and interactive multi-turn chats** with a clarification step.
+
+---
+
+## Features
+
+- **SQLite + MCP**
+  - Schema for `customers`, `menu_items`, `orders`, `order_items`, `reservations`, `customer_preferences`.
+  - Data seeded via `database/seed.sql` (50+ menu items, 18 customers).
+  - Accessed through `mcp-server-sqlite` via `restaurant_flow.mcp_init`.
+
+- **Custom MCP-Compatible Tools** (located in `src/restaurant_flow/tools/`):
+  - `MenuSearchTool` – search menu by name/category.
+  - `OrderLookupTool` – create orders, lookup by ID/phone.
+  - `ReservationLookupTool` – create and lookup reservations.
+  - `CustomerLookupTool` – search customers by name/phone/email.
+  - `CustomerPreferenceTool` – DB-backed memory (`get`, `set`, `get_all`).
+
+- **Agents** (see `src/restaurant_flow/agents.py`):
+  - Intent Classifier
+  - Menu Specialist
+  - Order Handler
+  - Reservation Agent
+  - Response Composer
+  - Escalation Agent (complaints)
+  - Fallback Agent (unclear requests)
+  - Clarification Agent (gathers missing info in interactive mode)
+
+- **Flow Architecture** (see `src/restaurant_flow/main.py`):
+  - `@start` **`classify_intent`**
+    - Single-shot: calls Intent Classifier agent.
+    - Interactive: runs Clarification Agent in a loop to gather `customer_name`, `items`, `party_size`, `date_time`, etc.
+    - Stores result in `RestaurantState.classification` and `RestaurantState.clarification_info`.
+    - Extracts `current_customer_id` and dietary/allergy info early.
+  - `@router` **`route_intent`**
+    - Pure routing logic based on `state.classification.intent` and `requires_escalation`.
+  - `@listen` handlers:
+    - `handle_menu` → Menu Specialist (`MenuResponse`).
+    - `handle_order` → Order Handler (`OrderResponse`).
+    - `handle_reservation` → Reservation Agent (`ReservationResponse`).
+    - `handle_escalation` → Escalation Agent (`FinalResponse`).
+    - `handle_fallback` → Fallback Agent (`FinalResponse`).
+    - `deliver_response` → Response Composer (`FinalResponse`).
+
+- **State & Memory** (see `src/restaurant_flow/models.py`):
+  - `RestaurantState` holds:
+    - `customer_message`, `classification`, `menu_response`, `order_response`, `reservation_response`, `final_response`.
+    - `current_customer_id` and `clarification_info`.
+  - `MemoryKeys` defines centralized keys like `LAST_ORDER_ID`, `USUAL_PARTY_SIZE`, `RECENT_ITEMS`, `DIETARY_RESTRICTIONS`, etc.
+  - Handlers update memory via `CustomerPreferenceTool` and `_update_memory`.
+
+---
 
 ## Installation
 
-Ensure you have Python >=3.10 <3.14 installed on your system. This project uses [UV](https://docs.astral.sh/uv/) for dependency management and package handling, offering a seamless setup and execution experience.
+Requirements:
 
-First, if you haven't already, install uv:
+- Python **>=3.10 <3.14**
+- [UV](https://docs.astral.sh/uv/) for dependency management
+
+Install `uv` if needed:
 
 ```bash
 pip install uv
 ```
 
-Next, navigate to your project directory and install the dependencies:
+From the project root (`restaurant_flow` folder), install dependencies:
 
-(Optional) Lock the dependencies and install them by using the CLI command:
 ```bash
-crewai install
+uv sync
 ```
 
-### Customizing
+Set up any required model/LLM configuration (e.g. `OPENAI_API_KEY` or local model settings) according to your environment.
 
-**Add your `OPENAI_API_KEY` into the `.env` file**
-
-- Modify `src/restaurant_flow/config/agents.yaml` to define your agents
-- Modify `src/restaurant_flow/config/tasks.yaml` to define your tasks
-- Modify `src/restaurant_flow/crew.py` to add your own logic, tools and specific args
-- Modify `src/restaurant_flow/main.py` to add custom inputs for your agents and tasks
+---
 
 ## Running the Project
 
-To kickstart your flow and begin execution, run this from the root folder of your project:
+### 1. Single-Shot Flow (one-off message)
+
+Runs the full Flow once using the message defined in `RestaurantState.customer_message` or passed in as input.
 
 ```bash
-crewai run
+uv run python -m restaurant_flow.main
 ```
 
-This command initializes the restaurant_flow Flow as defined in your configuration.
+### 2. Interactive Chat with Clarification
 
-This example, unmodified, will run the create a `report.md` file with the output of a research on LLMs in the root folder.
+Runs an interactive CLI chat. The Clarification Agent will ask follow-up questions to gather missing details before the main Flow runs.
 
-## Understanding Your Crew
+```bash
+uv run python -m restaurant_flow.main chat
+```
 
-The restaurant_flow Crew is composed of multiple AI agents, each with unique roles, goals, and tools. These agents collaborate on a series of tasks, defined in `config/tasks.yaml`, leveraging their collective skills to achieve complex objectives. The `config/agents.yaml` file outlines the capabilities and configurations of each agent in your crew.
+You can type natural language like:
 
-## Support
+- `I want to order pizza` → it will ask for name / details.
+- `Book a table` → it will ask for name, party size, date/time.
 
-For support, questions, or feedback regarding the {{crew_name}} Crew or crewAI.
+Type `quit` to exit.
 
-- Visit our [documentation](https://docs.crewai.com)
-- Reach out to us through our [GitHub repository](https://github.com/joaomdmoura/crewai)
-- [Join our Discord](https://discord.com/invite/X4JWnZnxPb)
-- [Chat with our docs](https://chatg.pt/DWjSBZn)
+### 3. Demo Scenarios (for evaluation)
 
-Let's create wonders together with the power and simplicity of crewAI.
+The `demo.py` script runs several known-good scenarios through the Flow and prints pass/fail status.
+
+```bash
+uv run python demo.py
+```
+
+Scenarios include:
+
+- Menu inquiry (desserts).
+- Complete order for a **seeded customer** (e.g. Noah Chen).
+- Complete reservation for a **seeded customer** (e.g. Harper Davis).
+- Complaint (escalation).
+- Unclear intent (fallback).
+
+---
+
+## Project Structure (Key Files)
+
+- `src/restaurant_flow/main.py` – Flow definition (`classify_intent`, `route_intent`, handlers, `deliver_response`).
+- `src/restaurant_flow/agents.py` – Agent factories and configurations.
+- `src/restaurant_flow/models.py` – Pydantic models and `RestaurantState`.
+- `src/restaurant_flow/tools/custom_tool.py` – `MenuSearchTool`, `OrderLookupTool`, `CustomerLookupTool`, `ReservationLookupTool`.
+- `src/restaurant_flow/tools/preference_tools.py` – `CustomerPreferenceTool`.
+- `database/schema.sql` & `database/seed.sql` – DB schema and seed data.
+- `demo.py` – Single-shot demo scenarios.
+
+For a deeper architectural explanation, see `ARCHITECTURE.md`.

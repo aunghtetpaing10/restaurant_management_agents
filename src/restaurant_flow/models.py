@@ -132,13 +132,13 @@ class RestaurantState(BaseModel):
     current_customer_id: int | None = Field(
         default=None, description="Database ID of current customer for memory tracking"
     )
-
-
-class ConversationMessage(BaseModel):
-    """Single message in a conversation."""
-
-    role: str = Field(description="Message role: 'user' or 'assistant'")
-    content: str = Field(description="Message content")
+    clarification_info: dict = Field(
+        default_factory=dict,
+        description=(
+            "Structured info gathered during clarification: "
+            "{customer_name, items, party_size, date_time, etc.}"
+        ),
+    )
 
 
 class ClarificationAnalysis(BaseModel):
@@ -161,29 +161,6 @@ class ClarificationAnalysis(BaseModel):
     collected_info: dict = Field(
         default_factory=dict,
         description="Info extracted so far: {customer_name, items, party_size, date_time, etc.}",
-    )
-
-
-class ConversationState(BaseModel):
-    """State for a multi-turn conversation session."""
-
-    session_id: str = Field(description="Unique session identifier")
-    customer_id: int | None = Field(
-        default=None, description="Customer ID if identified"
-    )
-    messages: List[ConversationMessage] = Field(
-        default_factory=list, description="Conversation history"
-    )
-    current_intent: str | None = Field(
-        default=None, description="Detected intent from conversation"
-    )
-    collected_info: dict = Field(
-        default_factory=dict,
-        description="Accumulated info from conversation: {customer_name, items, party_size, etc.}",
-    )
-    status: str = Field(
-        default="gathering_info",
-        description="Session status: 'gathering_info' or 'ready_to_process'",
     )
 
 
