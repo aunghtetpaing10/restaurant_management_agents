@@ -100,29 +100,52 @@ class MenuSearchTool(BaseTool):
         return "\n".join(lines)
 
 
+def _parse_optional_int(v):
+    """Parse optional int, handling string 'None' and empty strings."""
+    if v is None or v == "None" or v == "null" or v == "":
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, str):
+        try:
+            return int(v)
+        except ValueError:
+            return None
+    return None
+
+
 class OrderLookupInput(BaseModel):
     """Input schema for OrderLookupTool."""
 
     action: str = Field(
         ...,
-        description="Action to perform: 'create' to create new order, 'lookup_by_id' to check status by order ID, 'lookup_by_phone' to check status by phone number",
+        description="Action to perform: 'create', 'lookup_by_id', or 'lookup_by_phone'",
     )
     customer_id: int | None = Field(
         default=None,
-        description="ID of the customer (required for 'create' action)",
+        description="Customer ID (required for 'create'). Do NOT call create without a valid customer_id.",
     )
     items: str | None = Field(
         default=None,
-        description="JSON string of order items for 'create' action: [{\"menu_item_id\": 1, \"quantity\": 2}, ...]",
+        description="JSON array of items for 'create': [{\"menu_item_id\": 1, \"quantity\": 2}]",
     )
     order_id: int | None = Field(
         default=None,
-        description="Order ID to lookup (required for 'lookup_by_id' action)",
+        description="Order ID (required for 'lookup_by_id')",
     )
     phone: str | None = Field(
         default=None,
-        description="Customer phone number to lookup orders (required for 'lookup_by_phone' action)",
+        description="Phone number (required for 'lookup_by_phone')",
     )
+
+    @classmethod
+    def model_validate(cls, obj, *args, **kwargs):
+        """Pre-process to handle string 'None' values."""
+        if isinstance(obj, dict):
+            for key in ["customer_id", "order_id"]:
+                if key in obj:
+                    obj[key] = _parse_optional_int(obj[key])
+        return super().model_validate(obj, *args, **kwargs)
 
 
 class OrderLookupTool(BaseTool):
@@ -164,6 +187,17 @@ class OrderLookupTool(BaseTool):
         if not read_query_tool:
             return "OrderLookupTool error: read_query tool not available."
 
+        # Validate required parameters early
+        if action == "create":
+            if not customer_id:
+                return "STOP: Cannot create order without customer_id. Ask the customer for their name or phone number first, then use customer_lookup to get their ID."
+            if not items:
+                return "STOP: Cannot create order without items. Use menu_search first to get menu_item_ids."
+        elif action == "lookup_by_id" and not order_id:
+            return "STOP: lookup_by_id requires order_id parameter."
+        elif action == "lookup_by_phone" and not phone:
+            return "STOP: lookup_by_phone requires phone parameter."
+
         # Route to appropriate action
         if action == "create":
             return self._create_order(
@@ -174,14 +208,14 @@ class OrderLookupTool(BaseTool):
         elif action == "lookup_by_phone":
             return self._lookup_by_phone(phone, read_query_tool)
         else:
-            return f"OrderLookupTool error: Unknown action '{action}'. Use 'create', 'lookup_by_id', or 'lookup_by_phone'."
+            return f"STOP: Unknown action '{action}'. Use 'create', 'lookup_by_id', or 'lookup_by_phone'."
 
     def _create_order(
         self, customer_id: int, items: str, write_query_tool, read_query_tool
     ) -> str:
         """Create a new order."""
         if not customer_id or not items:
-            return "OrderLookupTool error: customer_id and items are required for 'create' action."
+            return "STOP: customer_id and items are required for 'create' action."
 
         if not write_query_tool:
             return "OrderLookupTool error: write_query tool not available for creating orders."
