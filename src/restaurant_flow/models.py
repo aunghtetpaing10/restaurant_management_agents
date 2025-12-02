@@ -102,7 +102,7 @@ class FinalResponse(BaseModel):
 class RestaurantState(BaseModel):
     """State model for the restaurant flow."""
 
-    customer_message: str = "I'd like to order a Herb Roasted Chicken and 2 Cold Brew Coffee for Noah Chen"
+    customer_message: str = "What are your options for beverages?"
     classification: IntentClassification | None = None
     menu_response: MenuResponse | None = None
     order_response: OrderResponse | None = None
