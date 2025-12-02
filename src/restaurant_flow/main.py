@@ -116,38 +116,29 @@ class RestaurantFlow(Flow[RestaurantState]):
 
         return None
 
-    def _extract_dietary_info(self) -> tuple[list[str], list[str]]:
-        """Extract dietary restrictions and allergies from customer message.
-        
-        Returns tuple of (dietary_restrictions, allergies).
-        """
-        message_lower = self.state.customer_message.lower()
-        
-        # Detect dietary restrictions
-        dietary = []
-        for keyword, normalized in self.DIETARY_KEYWORDS.items():
-            if keyword in message_lower and normalized not in dietary:
-                dietary.append(normalized)
-        
-        # Detect allergies
-        allergies = []
-        for keyword, normalized in self.ALLERGY_KEYWORDS.items():
-            if keyword in message_lower and normalized not in allergies:
-                allergies.append(normalized)
-        
-        return dietary, allergies
-
     def _save_dietary_info(self):
         """Detect and save dietary info from current message."""
         if not self.state.current_customer_id:
             return
-            
-        dietary, allergies = self._extract_dietary_info()
-        
+
+        message_lower = self.state.customer_message.lower()
+
+        # Detect dietary restrictions
+        dietary: list[str] = []
+        for keyword, normalized in self.DIETARY_KEYWORDS.items():
+            if keyword in message_lower and normalized not in dietary:
+                dietary.append(normalized)
+
+        # Detect allergies
+        allergies: list[str] = []
+        for keyword, normalized in self.ALLERGY_KEYWORDS.items():
+            if keyword in message_lower and normalized not in allergies:
+                allergies.append(normalized)
+
         if dietary:
             self._update_memory(MemoryKeys.DIETARY_RESTRICTIONS, ", ".join(dietary))
             print(f"[MEMORY] Detected dietary restrictions: {dietary}")
-            
+
         if allergies:
             self._update_memory(MemoryKeys.ALLERGIES, ", ".join(allergies))
             print(f"[MEMORY] Detected allergies: {allergies}")
@@ -213,45 +204,6 @@ class RestaurantFlow(Flow[RestaurantState]):
             return "New customer - no previous history."
 
         return "\n".join(context_lines)
-
-    def _format_specialist_data(self) -> str:
-        """Format specialist response data for the response composer."""
-        if self.state.menu_response:
-            menu = self.state.menu_response
-            return f"""
-            Menu Specialist Response:
-            - Items found: {", ".join(menu.menu_items)}
-            - Prices: {menu.prices}
-            """
-        elif self.state.order_response:
-            order = self.state.order_response
-            order_items_lines = "\n".join(
-                [
-                    f"                • {item.menu} x{item.quantity} @ {item.price}"
-                    for item in order.items_ordered
-                ]
-            )
-            if not order_items_lines:
-                order_items_lines = "                • (none)"
-
-            return f"""
-            Order Handler Response:
-            - Order ID: {order.order_id}
-            - Items: {order_items_lines}
-            - Total amount: ${order.total_amount}
-            - Order status: {order.order_status}
-            """
-        elif self.state.reservation_response:
-            reservation = self.state.reservation_response
-            return f"""
-            Reservation Agent Response:
-            - Reservation ID: {reservation.reservation_id}
-            - Party size: {reservation.party_size}
-            - Date: {reservation.reservation_datetime}
-            - Status: {reservation.status}
-            - Special requests: {reservation.special_requests}
-            """
-        return ""
 
     def _gather_info_interactive(self) -> tuple[str, str]:
         """Gather required info from user via clarification loop.
@@ -619,7 +571,44 @@ class RestaurantFlow(Flow[RestaurantState]):
         composer = create_response_composer()
 
         # Format the specialist response data for the composer
-        specialist_data = self._format_specialist_data()
+        if self.state.menu_response:
+            menu = self.state.menu_response
+            specialist_data = f"""
+            Menu Specialist Response:
+            - Items found: {", ".join(menu.menu_items)}
+            - Prices: {menu.prices}
+            """
+        elif self.state.order_response:
+            order = self.state.order_response
+            order_items_lines = "\n".join(
+                [
+                    f"                • {item.menu} x{item.quantity} @ {item.price}"
+                    for item in order.items_ordered
+                ]
+            )
+            if not order_items_lines:
+                order_items_lines = "                • (none)"
+
+            specialist_data = f"""
+            Order Handler Response:
+            - Order ID: {order.order_id}
+            - Items: {order_items_lines}
+            - Total amount: ${order.total_amount}
+            - Order status: {order.order_status}
+            """
+        elif self.state.reservation_response:
+            reservation = self.state.reservation_response
+            specialist_data = f"""
+            Reservation Agent Response:
+            - Reservation ID: {reservation.reservation_id}
+            - Party size: {reservation.party_size}
+            - Date: {reservation.reservation_datetime}
+            - Status: {reservation.status}
+            - Special requests: {reservation.special_requests}
+            """
+        else:
+            specialist_data = ""
+
         query = get_response_composer_prompt(
             self.state.customer_message, specialist_data
         )
