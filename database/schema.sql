@@ -53,3 +53,16 @@ CREATE TABLE reservations (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE
 );
+
+CREATE TABLE customer_preferences (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    customer_id INTEGER NOT NULL,
+    preference_key TEXT NOT NULL,
+    preference_value TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE,
+    UNIQUE(customer_id, preference_key)
+);
+
+CREATE INDEX idx_preferences_customer ON customer_preferences(customer_id);
