@@ -1,4 +1,5 @@
 from typing import List
+import time
 from crewai import LLM, Agent
 from crewai.flow.flow import Flow, listen, or_, start, router
 from pydantic import BaseModel, Field
@@ -11,6 +12,20 @@ from restaurant_flow.tools.custom_tool import (
 )
 
 llm = LLM(model="ollama/llama3.1:8b", base_url="http://localhost:11434")
+
+
+def retry_agent_call(agent_func, max_retries=2, delay=1):
+    """Simple retry wrapper for agent calls with exponential backoff."""
+    for attempt in range(max_retries + 1):
+        try:
+            return agent_func()
+        except Exception as e:
+            if attempt == max_retries:
+                print(f"[ERROR] Agent call failed after {max_retries + 1} attempts: {str(e)}")
+                raise
+            print(f"[RETRY] Attempt {attempt + 1} failed, retrying in {delay}s: {str(e)}")
+            time.sleep(delay)
+            delay *= 2 
 
 
 class IntentClassification(BaseModel):
@@ -69,8 +84,12 @@ class ReservationResponse(BaseModel):
     reservation_id: int | None = Field(
         default=None, description="Reservation ID if available"
     )
-    party_size: int = Field(description="Number of guests")
-    reservation_datetime: str = Field(description="Reservation date (YYYY-MM-DD)")
+    party_size: int | None = Field(
+        default=None, description="Number of guests (if known)"
+    )
+    reservation_datetime: str | None = Field(
+        default=None, description="Reservation date/time (if known)"
+    )
     status: str = Field(
         description="Status of reservation (confirmed, waitlisted, cancelled, etc.)"
     )
@@ -93,7 +112,7 @@ class FinalResponse(BaseModel):
 
 class RestaurantState(BaseModel):
     customer_message: str = (
-        "I want to see my order history for Liam Patel"
+        "I want to see my reservation history for Sophia Kim"
     )
     classification: IntentClassification | None = None
     menu_response: MenuResponse | None = None
@@ -136,12 +155,17 @@ class RestaurantFlow(Flow[RestaurantState]):
         Set confidence: high/medium/low based on clarity.
         """
 
-        result = classifier.kickoff(query, response_format=IntentClassification)
-        classification = result.pydantic
-
-        print(f"[CLASSIFY] Intent: {classification.intent} | Escalation: {classification.requires_escalation} | Confidence: {classification.confidence}")
-
-        self.state.classification = classification
+        try:
+            result = retry_agent_call(
+                lambda: classifier.kickoff(query, response_format=IntentClassification)
+            )
+            classification = result.pydantic
+            print(f"[CLASSIFY] Intent: {classification.intent} | Escalation: {classification.requires_escalation} | Confidence: {classification.confidence}")
+            self.state.classification = classification
+        except Exception as e:
+            print(f"[CLASSIFY] Critical error - routing to fallback: {str(e)}")
+            # Fallback to general handler on critical failure
+            return "fallback"
 
         # Check for escalation first
         if classification.requires_escalation:
@@ -192,12 +216,19 @@ class RestaurantFlow(Flow[RestaurantState]):
         Return: dish names and prices in MenuResponse format.
         """
 
-        result = menu_specialist.kickoff(query, response_format=MenuResponse)
-
-        print(f"[MENU] Found {len(result.pydantic.menu_items)} items")
-
-        # Update state directly instead of returning
-        self.state.menu_response = result.pydantic
+        try:
+            result = retry_agent_call(
+                lambda: menu_specialist.kickoff(query, response_format=MenuResponse)
+            )
+            print(f"[MENU] Found {len(result.pydantic.menu_items)} items")
+            self.state.menu_response = result.pydantic
+        except Exception as e:
+            print(f"[MENU] Error processing menu inquiry: {str(e)}")
+            # Create error response
+            self.state.menu_response = MenuResponse(
+                menu_items=["Unable to retrieve menu at this time. Please try again."]
+            )
+        
         return self.state.menu_response
 
     @listen("order_request")
@@ -233,12 +264,19 @@ class RestaurantFlow(Flow[RestaurantState]):
         
         For EXISTING order lookup:
         1. Extract identifier from message (order ID, phone, or name)
-        2. If order ID provided (e.g., "#18", "order 42"): call order_lookup(action='lookup_by_id', order_id=18)
-        3. If phone OR name provided:
-           a. If phone given (e.g., "phone is 555-1005"): call order_lookup(action='lookup_by_phone', phone="555-1005")
-           b. If name given (e.g., "name is Mia Johnson"): 
+        2. CRITICAL: order_id is NOT the same as customer_id!
+           - order_id = the ID of a specific order (e.g., "order #18")
+           - customer_id = the ID of a customer (from customer_lookup)
+        3. If explicit order_id provided (e.g., "#18", "order 42"):
+           call order_lookup(action='lookup_by_id', order_id=18)
+        4. If phone OR name provided (NO explicit order_id):
+           a. If phone given (e.g., "phone is 555-1005"): 
+              call order_lookup(action='lookup_by_phone', phone="555-1005")
+           b. If name given (e.g., "name is Mia Johnson", "for Mia Johnson"): 
               - First use customer_lookup(query="Mia Johnson") to get phone
-              - Then use order_lookup(action='lookup_by_phone', phone=<found_phone>)
+              - Tool returns: "ID: 5 | Mia Johnson | Phone: 555-1005 | Email: mia.johnson@example.com"
+              - Extract PHONE NUMBER (555-1005), NOT the customer ID!
+              - Then call order_lookup(action='lookup_by_phone', phone="555-1005")
            - Tool output example:
              "Orders for Mia Johnson (phone: 555-1005):\n\nOrder #27 - in_progress\n  Date: 2025-12-01 18:30:00\n  Total: $45.00"
            - Use the most recent order entry to populate OrderResponse (order_id, items if provided, total_amount, order_status)
@@ -246,12 +284,22 @@ class RestaurantFlow(Flow[RestaurantState]):
         After tool call: If JSON_SUMMARY present, parse it. Otherwise parse text output to fill OrderResponse fields. Ensure reported items/status match customer request.
         """ 
 
-        result = order_handler.kickoff(query, response_format=OrderResponse)
-
-        print(f"[ORDER] ID: {result.pydantic.order_id} | Items: {len(result.pydantic.items_ordered)} | Total: ${result.pydantic.total_amount} | Status: {result.pydantic.order_status}")
-
-        # Update state directly instead of returning
-        self.state.order_response = result.pydantic
+        try:
+            result = retry_agent_call(
+                lambda: order_handler.kickoff(query, response_format=OrderResponse)
+            )
+            print(f"[ORDER] ID: {result.pydantic.order_id} | Items: {len(result.pydantic.items_ordered)} | Total: ${result.pydantic.total_amount} | Status: {result.pydantic.order_status}")
+            self.state.order_response = result.pydantic
+        except Exception as e:
+            print(f"[ORDER] Error processing order: {str(e)}")
+            # Create error response
+            self.state.order_response = OrderResponse(
+                order_id=0,
+                items_ordered=[],
+                total_amount=0.0,
+                order_status="error - unable to process request"
+            )
+        
         return self.state.order_response
 
     @listen("reservation_request")
@@ -297,14 +345,19 @@ class RestaurantFlow(Flow[RestaurantState]):
         
         For EXISTING reservation lookup:
         1. Extract reservation identifier (reservation_id, phone, or name) from message
-        2. If reservation_id provided: call reservation_lookup(action='lookup_by_id', reservation_id=X)
-        3. If phone OR name provided:
-           a. If phone given (e.g., "phone is 555-1005"): call reservation_lookup(action='lookup_by_phone', phone="555-1005")
-           b. If name given (e.g., "name is Mia Johnson"):
-              - First use customer_lookup(query="Mia Johnson") to get phone
-              - Tool returns: "ID: 5 | Mia Johnson | Phone: 555-1005 | Email: mia.johnson@example.com"
-              - Extract phone number from result
-              - Then call reservation_lookup(action='lookup_by_phone', phone="555-1005")
+        2. CRITICAL: reservation_id is NOT the same as customer_id!
+           - reservation_id = the ID of a specific reservation (e.g., "reservation #15")
+           - customer_id = the ID of a customer (from customer_lookup)
+        3. If explicit reservation_id provided (e.g., "reservation #15", "booking ID 20"):
+           call reservation_lookup(action='lookup_by_id', reservation_id=15)
+        4. If phone OR name provided (NO explicit reservation_id):
+           a. If phone given (e.g., "phone is 555-1005"): 
+              call reservation_lookup(action='lookup_by_phone', phone="555-1005")
+           b. If name given (e.g., "name is Liam Patel", "for Liam Patel"):
+              - First use customer_lookup(query="Liam Patel") to get phone
+              - Tool returns: "ID: 2 | Liam Patel | Phone: 555-1004 | Email: liam.patel@example.com"
+              - Extract PHONE NUMBER (555-1004), NOT the customer ID!
+              - Then call reservation_lookup(action='lookup_by_phone', phone="555-1004")
            - Tool output looks like:
              "Reservations for Mia Johnson (phone: 555-1005):\n\nReservation #15 - confirmed\n  Date & Time: 2025-12-04 19:00:00\n  Party Size: 6 people"
            - Parse the first reservation entry (closest upcoming) to fill ReservationResponse:
@@ -313,11 +366,23 @@ class RestaurantFlow(Flow[RestaurantState]):
         Fill ReservationResponse fields with the parsed data. If no reservations returned, set status="awaiting_details" and explain that no reservation exists.
         """
 
-        result = reservation_agent.kickoff(query, response_format=ReservationResponse)
-
-        print(f"[RESERVATION] ID: {result.pydantic.reservation_id} | Party: {result.pydantic.party_size} | Time: {result.pydantic.reservation_datetime} | Status: {result.pydantic.status}")
-
-        self.state.reservation_response = result.pydantic
+        try:
+            result = retry_agent_call(
+                lambda: reservation_agent.kickoff(query, response_format=ReservationResponse)
+            )
+            print(f"[RESERVATION] ID: {result.pydantic.reservation_id} | Party: {result.pydantic.party_size} | Time: {result.pydantic.reservation_datetime} | Status: {result.pydantic.status}")
+            self.state.reservation_response = result.pydantic
+        except Exception as e:
+            print(f"[RESERVATION] Error processing reservation: {str(e)}")
+            # Create error response
+            self.state.reservation_response = ReservationResponse(
+                reservation_id=0,
+                party_size=0,
+                reservation_datetime="N/A",
+                status="error - unable to process request",
+                special_requests=""
+            )
+        
         return self.state.reservation_response
 
     @listen("escalation")
@@ -433,11 +498,20 @@ class RestaurantFlow(Flow[RestaurantState]):
         - Return in FinalResponse format
         """
 
-        result = composer.kickoff(query, response_format=FinalResponse)
-
-        print("[DELIVER] Final response composed")
-
-        self.state.final_response = result.pydantic
+        try:
+            result = retry_agent_call(
+                lambda: composer.kickoff(query, response_format=FinalResponse)
+            )
+            print("[DELIVER] Final response composed")
+            self.state.final_response = result.pydantic
+        except Exception as e:
+            print(f"[DELIVER] Error composing response: {str(e)}")
+            # Create fallback response
+            self.state.final_response = FinalResponse(
+                customer_message_summary="Unable to process request",
+                final_response="We apologize, but we're experiencing technical difficulties. Please try again in a moment or contact us directly for assistance."
+            )
+        
         return self.state.final_response
 
 
