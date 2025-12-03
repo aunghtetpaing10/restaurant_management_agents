@@ -2,15 +2,6 @@
 
 This project is a **demo multi-agent system** for a restaurant assistant, built with [CrewAI Flow](https://crewai.com), SQLite, and MCP-compatible tools.
 
-It is designed to showcase your ability to:
-
-- **Design a restaurant database** and access it via MCP.
-- **Build custom tools** for menu search, order lookup, reservations, and preferences.
-- **Orchestrate multiple agents** (intent classifier, specialists, composer) in a Flow with conditional routing.
-- **Use Pydantic models** for structured outputs and state management.
-- **Add memory** to remember customer preferences across conversations.
-- **Support both single-shot and interactive multi-turn chats** with a clarification step.
-
 ---
 
 ## Features
@@ -81,7 +72,53 @@ From the project root (`restaurant_flow` folder), install dependencies:
 uv sync
 ```
 
-Set up any required model/LLM configuration (e.g. `OPENAI_API_KEY` or local model settings) according to your environment.
+### 1. Configure environment variables (LLM + MCP)
+
+You can either export these variables in your shell or create a `.env` file in the
+project root (many tools, including the CrewAI CLI, will auto-load `.env`).
+
+**Recommended `.env` example:**
+
+```bash
+# LLM configuration (defaults shown)
+RESTAURANT_LLM_MODEL=ollama/llama3.1:8b
+RESTAURANT_LLM_BASE_URL=http://localhost:11434
+
+# OpenAI API key (if using OpenAI)
+OPENAI_API_KEY=your_openai_api_key
+
+# SQLite database path for MCP (default is db/restaurant.db)
+# If you follow the steps below exactly, you can omit this.
+RESTAURANT_DB_PATH=db/restaurant.db
+
+# MCP server command (defaults)
+RESTAURANT_MCP_COMMAND=uvx
+RESTAURANT_MCP_SERVER=mcp-server-sqlite
+```
+
+If you prefer a different LLM (e.g. OpenAI via LiteLLM), set `RESTAURANT_LLM_MODEL`
+and `RESTAURANT_LLM_BASE_URL` accordingly.
+
+### 2. Initialize the SQLite database
+
+The Flow expects a SQLite database with the schema and seed data from
+`database/schema.sql` and `database/seed.sql`.
+
+From the project root, run (requires the `sqlite3` CLI):
+
+```bash
+# Create db directory if it doesn't exist
+mkdir -p db
+
+# Create schema
+sqlite3 db/restaurant.db < database/schema.sql
+
+# Seed data (customers, menu_items, etc.)
+sqlite3 db/restaurant.db < database/seed.sql
+```
+
+By default, the MCP server will use `db/restaurant.db` via `RESTAURANT_DB_PATH` or
+the built-in default in `mcp_init.py`.
 
 ---
 
